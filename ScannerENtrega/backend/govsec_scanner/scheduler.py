@@ -11,6 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from govsec_scanner.config import get_settings
 from govsec_scanner.database import SessionLocal, check_database_ready
+from govsec_scanner.healthcheck import get_default_instance_id
 from govsec_scanner.models import ScanExecution, ScanSchedule, utcnow
 from govsec_scanner.services import audit, next_cron_run, seed_profiles, update_service_heartbeat
 
@@ -111,7 +112,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _signal_handler)
 
     settings = get_settings()
-    instance_id = f"scheduler-{socket.gethostname()}"
+    instance_id = get_default_instance_id("scheduler")
 
     with SessionLocal() as db:
         if not check_database_ready(db):

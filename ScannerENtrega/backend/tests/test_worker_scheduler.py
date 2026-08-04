@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
+import signal
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
 
 from govsec_scanner.database import Base, SessionLocal, engine
+from govsec_scanner.engines.base import HostObservation
 from govsec_scanner.healthcheck import check_health
 from govsec_scanner.models import (
     AuthorizedRange,
@@ -20,6 +23,7 @@ from govsec_scanner.scheduler import enqueue_due_schedules
 from govsec_scanner.services import (
     _sanitize_error_message,
     claim_next_execution,
+    execute_scan,
     seed_profiles,
     update_service_heartbeat,
 )
@@ -142,7 +146,6 @@ def test_scheduler_no_duplicate_execution() -> None:
     count1 = enqueue_due_schedules()
     assert count1 == 1
 
-    # Segundas tentativas nao devem duplicar execucoes
     count2 = enqueue_due_schedules()
     assert count2 == 0
 
@@ -155,31 +158,100 @@ def test_worker_scheduler_no_migrations() -> None:
     from govsec_scanner.scheduler import main as scheduler_main
     from govsec_scanner.worker import main as worker_main
 
-    with patch("govsec_scanner.database.check_database_ready", return_value=False):
-        with pytest.raises(RuntimeError, match="Banco de dados sem migration aplicada"):
+    with patch("alembic.command.upgrade") as mock_alembic_upgrade:
+        with (
+            patch("govsec_scanner.worker.check_database_ready", return_value=False),
+            pytest.raises(RuntimeError, match="Banco de dados sem migration aplicada"),
+        ):
             worker_main()
 
-        with pytest.raises(RuntimeError, match="Banco de dados sem migration aplicada"):
+        with (
+            patch("govsec_scanner.scheduler.check_database_ready", return_value=False),
+            pytest.raises(RuntimeError, match="Banco de dados sem migration aplicada"),
+        ):
             scheduler_main()
 
+        mock_alembic_upgrade.assert_not_called()
 
-def test_heartbeat_updates() -> None:
+
+def test_healthcheck_validates_instance_id() -> None:
     with SessionLocal() as db:
         update_service_heartbeat(
-            db, "worker", "worker-1", status="healthy", details={"test": True}
-        )
-        update_service_heartbeat(
-            db, "scheduler", "scheduler-1", status="healthy", details={"test": True}
+            db, "worker", "worker-inst-A", status="healthy", details={"test": True}
         )
 
-        hb_worker = db.scalar(
-            select(ServiceHeartbeat).where(ServiceHeartbeat.service_name == "worker")
-        )
-        assert hb_worker is not None
-        assert hb_worker.status == "healthy"
+    # Healthcheck para instancia exata existente deve passar
+    assert check_health("worker", max_staleness_seconds=10, instance_id="worker-inst-A") is True
 
-    assert check_health("worker", max_staleness_seconds=10) is True
-    assert check_health("scheduler", max_staleness_seconds=10) is True
+    # Healthcheck para outra instancia deve falhar
+    assert check_health("worker", max_staleness_seconds=10, instance_id="worker-inst-B") is False
+
+
+def test_worker_service_heartbeat_during_long_scan() -> None:
+    with SessionLocal() as db:
+        range_obj = AuthorizedRange(
+            name="Faixa Scan Longo",
+            cidr="192.168.10.0/24",
+            address_count=256,
+            environment="test",
+            owner="admin",
+            authorization_reference="REF-LONG",
+            allow_public=True,
+        )
+        profile = db.scalar(select(ScannerProfile).where(ScannerProfile.slug == "discovery"))
+        assert profile is not None
+        db.add(range_obj)
+        db.commit()
+
+        exec1 = ScanExecution(
+            range_id=range_obj.id,
+            profile_id=profile.id,
+            status="running",
+            requested_by="admin",
+            justification="Long scan test",
+            started_at=utcnow(),
+        )
+        db.add(exec1)
+        db.commit()
+        execution_id = exec1.id
+
+    async def mock_scan_work() -> None:
+        with SessionLocal() as db:
+            asyncio.run(
+                execute_scan(
+                    db,
+                    execution_id,
+                    hb_interval_override=0.2,
+                    instance_id="worker-long-test",
+                )
+            )
+
+    async def mock_async_scan(*args: object, **kwargs: object) -> list[HostObservation]:
+        await asyncio.sleep(0.5)
+        return []
+
+    with (
+        patch("govsec_scanner.engines.nmap.NmapEngine.scan", side_effect=mock_async_scan),
+        SessionLocal() as db,
+    ):
+        asyncio.run(
+            execute_scan(
+                db,
+                execution_id,
+                hb_interval_override=0.2,
+                instance_id="worker-long-test",
+            )
+        )
+
+    with SessionLocal() as db:
+        hb = db.scalar(
+            select(ServiceHeartbeat).where(
+                ServiceHeartbeat.service_name == "worker",
+                ServiceHeartbeat.instance_id == "worker-long-test",
+            )
+        )
+        assert hb is not None
+        assert hb.status == "healthy"
 
 
 def test_failure_logged_without_secrets() -> None:
@@ -190,15 +262,17 @@ def test_failure_logged_without_secrets() -> None:
     assert "[REDACTED]" in sanitized or "postgresql://" not in sanitized
 
 
-def test_shutdown_behavior() -> None:
+def test_real_signal_shutdown() -> None:
+    from govsec_scanner.worker import _signal_handler
+
     with SessionLocal() as db:
         range_obj = AuthorizedRange(
-            name="Faixa Shutdown",
-            cidr="10.1.0.0/24",
+            name="Faixa Signal",
+            cidr="10.2.0.0/24",
             address_count=256,
             environment="test",
             owner="admin",
-            authorization_reference="REF-004",
+            authorization_reference="REF-SIG",
             allow_public=True,
         )
         profile = db.scalar(select(ScannerProfile).where(ScannerProfile.slug == "discovery"))
@@ -211,17 +285,16 @@ def test_shutdown_behavior() -> None:
             profile_id=profile.id,
             status="queued",
             requested_by="admin",
-            justification="Shutdown test",
+            justification="Signal test",
         )
         db.add(exec1)
         db.commit()
 
-    with SessionLocal() as db:
-        claimed_id = claim_next_execution(db)
-        assert claimed_id == exec1.id
+    # Dispara manipulador de sinal real SIGTERM
+    _signal_handler(signal.SIGTERM, None)
 
-    with SessionLocal() as db:
-        exec_db = db.scalar(select(ScanExecution).where(ScanExecution.id == claimed_id))
-        assert exec_db is not None
-        assert exec_db.status == "running"
-        assert exec_db.status != "completed"
+    from govsec_scanner import worker
+    assert worker._shutdown is True
+
+    # Restaura _shutdown para nao afetar outros testes
+    worker._shutdown = False

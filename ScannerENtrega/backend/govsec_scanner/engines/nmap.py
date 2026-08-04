@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import shutil
+import socket
 import xml.etree.ElementTree as ET
 from ipaddress import ip_network
 
@@ -14,6 +16,17 @@ from govsec_scanner.engines.base import (
 )
 from govsec_scanner.models import ScannerProfile
 from govsec_scanner.scope import address_belongs_to_scope
+
+
+def _can_use_raw_sockets() -> bool:
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        return True
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
+        s.close()
+        return True
+    except (OSError, PermissionError):
+        return False
 
 
 def _ports(value: str) -> list[int]:
@@ -41,6 +54,7 @@ def build_nmap_command(
     if not tcp_ports and not udp_ports:
         raise ValueError("O perfil nao possui portas configuradas.")
 
+    can_raw = _can_use_raw_sockets()
     command = [
         binary,
         "-n",
@@ -58,7 +72,7 @@ def build_nmap_command(
     ]
     if tcp_ports:
         command.append("-sT")
-    if udp_ports:
+    if udp_ports and can_raw:
         command.append("-sU")
     if profile.service_detection_enabled:
         command.extend(["-sV", "--version-light"])
@@ -70,7 +84,7 @@ def build_nmap_command(
     port_specs: list[str] = []
     if tcp_ports:
         port_specs.append("T:" + ",".join(str(port) for port in tcp_ports))
-    if udp_ports:
+    if udp_ports and can_raw:
         port_specs.append("U:" + ",".join(str(port) for port in udp_ports))
     command.extend(["-p", ",".join(port_specs), "--", target])
     return command

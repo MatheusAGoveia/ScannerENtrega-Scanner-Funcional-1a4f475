@@ -333,6 +333,7 @@ async def _periodic_heartbeat(
     stop_event: asyncio.Event,
     bind_engine: Any = None,
     on_heartbeat: Any = None,
+    instance_id: str | None = None,
 ) -> None:
     from sqlalchemy.orm import Session as SQLAlchemySession
 
@@ -346,9 +347,13 @@ async def _periodic_heartbeat(
             if bind_engine is not None:
                 with SQLAlchemySession(bind=bind_engine) as hb_db:
                     touch_execution_heartbeat(hb_db, execution_id)
+                    if instance_id:
+                        update_service_heartbeat(hb_db, "worker", instance_id, status="healthy")
             else:
                 with SessionLocal() as hb_db:
                     touch_execution_heartbeat(hb_db, execution_id)
+                    if instance_id:
+                        update_service_heartbeat(hb_db, "worker", instance_id, status="healthy")
 
             if on_heartbeat is not None and callable(on_heartbeat):
                 on_heartbeat()
@@ -358,7 +363,7 @@ async def _periodic_heartbeat(
             logger.warning(
                 "Falha ao atualizar heartbeat para execucao %s: %s",
                 execution_id,
-                _sanitize_error_message(exc),
+                exc,
             )
 
 
@@ -368,6 +373,7 @@ async def execute_scan(
     settings: Settings | None = None,
     hb_interval_override: float | None = None,
     on_heartbeat: Any = None,
+    instance_id: str | None = None,
 ) -> None:
     settings = settings or get_settings()
     hb_interval = hb_interval_override or max(0.5, settings.worker_stale_timeout_seconds / 4.0)
@@ -380,6 +386,7 @@ async def execute_scan(
             stop_event,
             bind_engine=bind_engine,
             on_heartbeat=on_heartbeat,
+            instance_id=instance_id,
         )
     )
 

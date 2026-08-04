@@ -8,6 +8,7 @@ import time
 
 from govsec_scanner.config import get_settings
 from govsec_scanner.database import SessionLocal, check_database_ready
+from govsec_scanner.healthcheck import get_default_instance_id
 from govsec_scanner.services import (
     claim_next_execution,
     execute_scan,
@@ -35,7 +36,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _signal_handler)
 
     settings = get_settings()
-    instance_id = f"worker-{socket.gethostname()}"
+    instance_id = get_default_instance_id("worker")
 
     with SessionLocal() as db:
         if not check_database_ready(db):
@@ -78,13 +79,17 @@ def main() -> None:
             execution_id = None
 
         if execution_id is None:
-            time.sleep(settings.worker_poll_seconds)
+            sleep_chunk = 0.5
+            slept = 0.0
+            while slept < settings.worker_poll_seconds and not _shutdown:
+                time.sleep(sleep_chunk)
+                slept += sleep_chunk
             continue
 
         logger.info("Execucao %s capturada pelo worker %s.", execution_id, instance_id)
         try:
             with SessionLocal() as db:
-                asyncio.run(execute_scan(db, execution_id, settings))
+                asyncio.run(execute_scan(db, execution_id, settings, instance_id=instance_id))
         except Exception as exc:
             logger.error("Falha durante execucao do scan %s: %s", execution_id, exc)
 

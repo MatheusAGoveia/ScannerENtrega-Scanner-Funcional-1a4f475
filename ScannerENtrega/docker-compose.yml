@@ -63,6 +63,9 @@ services:
     restart: unless-stopped
     command: ["python", "-m", "govsec_scanner.worker"]
     environment: *backend-environment
+    cap_add:
+      - NET_RAW
+      - NET_BIND_SERVICE
     depends_on:
       postgres:
         condition: service_healthy
