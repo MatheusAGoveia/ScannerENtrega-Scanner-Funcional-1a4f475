@@ -112,6 +112,7 @@ class ScanExecution(Base):
     cancellation_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     active_ips: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     services_discovered: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

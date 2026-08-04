@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     max_import_records: int = Field(default=2000, ge=1, le=10000)
     max_import_bytes: int = Field(default=10 * 1024 * 1024, ge=1024)
     worker_poll_seconds: float = Field(default=2.0, ge=0.2, le=60)
+    worker_stale_timeout_seconds: float = Field(default=300.0, ge=10.0, le=86400.0)
     scheduler_poll_seconds: float = Field(default=15.0, ge=1, le=300)
     subprocess_output_limit_bytes: int = Field(default=25 * 1024 * 1024, ge=1024)
     nmap_binary: str = "nmap"

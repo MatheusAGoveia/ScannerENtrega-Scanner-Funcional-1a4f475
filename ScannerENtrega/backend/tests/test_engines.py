@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -30,15 +31,24 @@ def _settings(**values: object) -> Settings:
     return Settings(api_key="test-api-key-with-at-least-24-chars", **values)
 
 
-def _fake_executable(path: Path, payload: bytes) -> None:
+def _fake_executable(path: Path, payload: bytes) -> Path:
+    if sys.platform == "win32" and not path.suffix:
+        path = path.with_suffix(".bat")
     encoded = payload.hex()
-    path.write_text(
-        "#!/usr/bin/env python3\n"
-        "import sys\n"
-        f"sys.stdout.buffer.write(bytes.fromhex('{encoded}'))\n",
-        encoding="utf-8",
-    )
-    path.chmod(0o700)
+    if sys.platform == "win32":
+        path.write_text(
+            f'@echo off\n"{sys.executable}" -c "import sys; sys.stdout.buffer.write(bytes.fromhex(\'{encoded}\'))"\n',
+            encoding="utf-8",
+        )
+    else:
+        path.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            f"sys.stdout.buffer.write(bytes.fromhex('{encoded}'))\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o700)
+    return path
 
 
 def test_nmap_command_has_bounded_defensive_flags(scanner_profile: ScannerProfile) -> None:
@@ -46,9 +56,30 @@ def test_nmap_command_has_bounded_defensive_flags(scanner_profile: ScannerProfil
 
     assert command[0] == "nmap"
     assert command[-1] == "10.42.16.0/24"
+    assert command[-2] == "--"
     assert "-sT" in command and "-sU" in command and "-sV" in command
     assert "--max-rate" in command and "--host-timeout" in command
     assert "-T2" in command
+
+
+def test_nmap_empty_xml_returns_empty_list() -> None:
+    assert parse_nmap_xml(b"", "10.42.16.0/24") == []
+    assert parse_nmap_xml(b"\n  \n", "10.42.16.0/24") == []
+
+
+def test_nuclei_jsonl_skips_malformed_lines_gracefully() -> None:
+    valid_item = json.dumps({
+        "template-id": "ssl-cert",
+        "ip": "10.42.16.12",
+        "matched-at": "https://10.42.16.12:443",
+        "info": {"name": "Certificado SSL", "severity": "low"},
+    })
+    payload = f"INVALID_NON_JSON_LINE\n{valid_item}\nANOTHER_CORRUPTED_LINE\n".encode()
+    findings = parse_nuclei_jsonl(payload, "10.42.16.0/24")
+
+    assert len(findings) == 1
+    assert findings[0].template_id == "ssl-cert"
+    assert findings[0].ip_address == "10.42.16.12"
 
 
 def test_nmap_xml_must_remain_inside_scope() -> None:
@@ -63,8 +94,7 @@ def test_nmap_xml_must_remain_inside_scope() -> None:
 def test_real_nmap_adapter_executes_a_bounded_subprocess(
     tmp_path: Path, scanner_profile: ScannerProfile
 ) -> None:
-    binary = tmp_path / "nmap-controlled"
-    _fake_executable(binary, NMAP_XML)
+    binary = _fake_executable(tmp_path / "nmap-controlled", NMAP_XML)
     engine = NmapEngine(_settings(nmap_binary=str(binary)))
 
     hosts = asyncio.run(
@@ -102,8 +132,9 @@ def test_nuclei_adapter_is_non_intrusive_and_scope_checked(
     }
     templates = tmp_path / "templates"
     templates.mkdir()
-    binary = tmp_path / "nuclei-controlled"
-    _fake_executable(binary, (json.dumps(result) + "\n").encode())
+    binary = _fake_executable(
+        tmp_path / "nuclei-controlled", (json.dumps(result) + "\n").encode()
+    )
     engine = NucleiEngine(_settings(nuclei_binary=str(binary), nuclei_templates_dir=templates))
 
     findings = asyncio.run(

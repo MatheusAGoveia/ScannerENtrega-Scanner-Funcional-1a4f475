@@ -68,6 +68,7 @@ export interface ScanExecution {
   cancellation_requested: boolean;
   queued_at: string;
   started_at?: string | null;
+  heartbeat_at?: string | null;
   finished_at?: string | null;
   active_ips: number;
   services_discovered: number;

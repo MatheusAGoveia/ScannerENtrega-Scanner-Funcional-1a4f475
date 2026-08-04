@@ -88,8 +88,8 @@ def parse_nuclei_jsonl(payload: bytes, expected_scope: str) -> list[FindingObser
             continue
         try:
             item = json.loads(raw_line)
-        except json.JSONDecodeError as exc:
-            raise EngineExecutionError("O Nuclei retornou JSONL invalido.") from exc
+        except (json.JSONDecodeError, TypeError):
+            continue
         parsed = urlparse(str(item.get("matched-at") or item.get("host") or ""))
         host_value = str(item.get("ip") or parsed.hostname or "")
         try:

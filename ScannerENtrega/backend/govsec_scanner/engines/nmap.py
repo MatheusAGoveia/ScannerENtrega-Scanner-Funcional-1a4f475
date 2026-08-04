@@ -72,11 +72,13 @@ def build_nmap_command(
         port_specs.append("T:" + ",".join(str(port) for port in tcp_ports))
     if udp_ports:
         port_specs.append("U:" + ",".join(str(port) for port in udp_ports))
-    command.extend(["-p", ",".join(port_specs), target])
+    command.extend(["-p", ",".join(port_specs), "--", target])
     return command
 
 
 def parse_nmap_xml(payload: bytes, expected_scope: str) -> list[HostObservation]:
+    if not payload or not payload.strip():
+        return []
     try:
         root = ET.fromstring(payload)
     except ET.ParseError as exc:

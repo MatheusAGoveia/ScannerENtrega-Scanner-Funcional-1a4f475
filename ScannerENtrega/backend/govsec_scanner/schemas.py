@@ -123,6 +123,7 @@ class ExecutionOut(OrmModel):
     cancellation_requested: bool
     queued_at: datetime
     started_at: datetime | None
+    heartbeat_at: datetime | None = None
     finished_at: datetime | None
     active_ips: int
     services_discovered: int

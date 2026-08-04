@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, timedelta
 
@@ -66,7 +67,7 @@ from govsec_scanner.services import audit, engine_version, next_cron_run, seed_p
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     init_database()
     from govsec_scanner.database import SessionLocal
 

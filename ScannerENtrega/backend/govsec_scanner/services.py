@@ -6,11 +6,11 @@ import json
 import logging
 import shutil
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from croniter import croniter
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from govsec_scanner.config import Settings, get_settings
@@ -143,10 +143,12 @@ def _engine_run(db: Session, execution: ScanExecution, engine: str) -> EngineRun
     if current is None:
         current = EngineRun(execution_id=execution.id, engine=engine)
         db.add(current)
+    now = utcnow()
     current.status = "running"
-    current.started_at = utcnow()
+    current.started_at = now
     current.finished_at = None
     current.error_message = None
+    execution.heartbeat_at = now
     db.commit()
     return current
 
@@ -340,6 +342,22 @@ async def execute_scan(db: Session, execution_id: str, settings: Settings | None
 
     partial_errors: list[str] = []
     hosts: list[HostObservation] = []
+    audit(
+        db,
+        "scan.execution.started",
+        "scan_execution",
+        execution.requested_by,
+        resource_id=execution.id,
+        details={
+            "target": scope.normalized,
+            "authorization_reference": execution.authorized_range.authorization_reference,
+            "profile": execution.profile.slug,
+            "nmap_version": engine_version(settings.nmap_binary),
+            "nuclei_version": engine_version(settings.nuclei_binary)
+            if execution.profile.vulnerability_detection_enabled
+            else None,
+        },
+    )
     try:
         nmap_run = _engine_run(db, execution, "nmap")
         hosts = await NmapEngine(settings).scan(
@@ -354,6 +372,14 @@ async def execute_scan(db: Session, execution_id: str, settings: Settings | None
         if _cancel_requested(db, execution.id):
             execution.status = "cancelled"
             execution.finished_at = utcnow()
+            audit(
+                db,
+                "scan.execution.cancelled",
+                "scan_execution",
+                execution.requested_by,
+                resource_id=execution.id,
+                details={"status": "cancelled"},
+            )
             db.commit()
             return
 
@@ -453,6 +479,23 @@ async def execute_scan(db: Session, execution_id: str, settings: Settings | None
         execution.status = "partially_completed" if partial_errors else "completed"
         execution.error_summary = "; ".join(partial_errors)[:4000] or None
         execution.finished_at = utcnow()
+        audit(
+            db,
+            "scan.execution.finished",
+            "scan_execution",
+            execution.requested_by,
+            resource_id=execution.id,
+            details={
+                "status": execution.status,
+                "duration_seconds": (execution.finished_at - execution.started_at).total_seconds()
+                if execution.finished_at and execution.started_at
+                else 0,
+                "active_ips": execution.active_ips,
+                "services_discovered": execution.services_discovered,
+                "vulnerabilities_discovered": execution.vulnerabilities_discovered,
+                "partial_errors": partial_errors,
+            },
+        )
         db.commit()
     except Exception as exc:
         logger.exception("Falha na execucao %s", execution.id)
@@ -467,6 +510,14 @@ async def execute_scan(db: Session, execution_id: str, settings: Settings | None
         execution.status = "failed"
         execution.error_summary = str(exc)[:4000]
         execution.finished_at = utcnow()
+        audit(
+            db,
+            "scan.execution.failed",
+            "scan_execution",
+            execution.requested_by,
+            resource_id=execution.id,
+            details={"status": "failed", "error": str(exc)[:2000]},
+        )
         db.commit()
 
 
@@ -482,7 +533,79 @@ def claim_next_execution(db: Session) -> str | None:
     execution = db.scalar(statement)
     if execution is None:
         return None
-    execution.status = "running"
-    execution.started_at = utcnow()
+
+    now = utcnow()
+    result = db.execute(
+        update(ScanExecution)
+        .where(ScanExecution.id == execution.id, ScanExecution.status == "queued")
+        .values(status="running", started_at=now, heartbeat_at=now)
+    )
+    if getattr(result, "rowcount", 0) == 0:
+        db.rollback()
+        return None
+
     db.commit()
     return execution.id
+
+
+def touch_execution_heartbeat(db: Session, execution_id: str) -> None:
+    now = utcnow()
+    db.execute(
+        update(ScanExecution)
+        .where(ScanExecution.id == execution_id, ScanExecution.status == "running")
+        .values(heartbeat_at=now)
+    )
+    db.commit()
+
+
+def recover_stale_executions(db: Session, stale_timeout_seconds: float = 300.0) -> int:
+    now = utcnow()
+    cutoff = now - timedelta(seconds=stale_timeout_seconds)
+    statement = (
+        select(ScanExecution)
+        .where(
+            ScanExecution.status == "running",
+            func.coalesce(ScanExecution.heartbeat_at, ScanExecution.started_at) <= cutoff,
+        )
+    )
+    if db.bind and db.bind.dialect.name == "postgresql":
+        statement = statement.with_for_update(skip_locked=True)
+    stale_executions = db.scalars(statement).all()
+    count = 0
+    for execution in stale_executions:
+        running_engine = db.scalar(
+            select(EngineRun).where(
+                EngineRun.execution_id == execution.id,
+                EngineRun.status == "running",
+            )
+        )
+        if running_engine:
+            _finish_engine(
+                db,
+                running_engine,
+                status="failed",
+                error=f"Motor interrompido por expiracao de heartbeat (sem heartbeat ativo ha mais de {int(stale_timeout_seconds)}s).",
+            )
+        execution.status = "failed"
+        execution.error_summary = (
+            f"Execucao obsoleta recuperada por reinicializacao/verificacao do worker "
+            f"(sem heartbeat ativo por mais de {int(stale_timeout_seconds)} segundos)."
+        )
+        execution.finished_at = now
+        audit(
+            db,
+            "scan.execution.recovered_stale",
+            "scan_execution",
+            "worker",
+            resource_id=execution.id,
+            details={
+                "previous_status": "running",
+                "stale_timeout_seconds": stale_timeout_seconds,
+                "recovered_at": now.isoformat(),
+            },
+        )
+        count += 1
+    if count > 0:
+        db.commit()
+    return count
+
