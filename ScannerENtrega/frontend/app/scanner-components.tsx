@@ -242,18 +242,158 @@ export function ScanSchedules({ go }: { go: (page: ScannerPage) => void }) {
 }
 
 export function ScanRuns({ go }: { go: (page: ScannerPage) => void }) {
-  const executions = usePolling<ScanExecution[]>("executions", 5000);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const selected = executions.data?.find(item => item.id === selectedId) ?? null;
+  const [cancelling, setCancelling] = useState(false);
+
+  // Polling dinamico: 3s se houver execucoes ativas (queued/running), senao 5s
+  const executions = usePolling<ScanExecution[]>("executions", 4000);
+  const hasActiveRun = executions.data?.some(item => ["queued", "running"].includes(item.status)) ?? false;
+
+  useEffect(() => {
+    if (!hasActiveRun) return;
+    const timer = setInterval(() => {
+      void executions.refresh();
+    }, 2500);
+    return () => clearInterval(timer);
+  }, [hasActiveRun, executions]);
+
+  // Polling individual de detalhes quando uma execucao estiver selecionada
+  const detailQuery = usePolling<ScanExecution>(selectedId ? `executions/${selectedId}` : "", 3000);
+  const selected = detailQuery.data ?? executions.data?.find(item => item.id === selectedId) ?? null;
+
   async function cancel() {
-    if (!selected) return;
-    await scannerRequest(`executions/${selected.id}/cancel`, { method: "POST", body: JSON.stringify({}) });
-    await executions.refresh();
+    if (!selected || cancelling) return;
+    setCancelling(true);
+    try {
+      await scannerRequest(`executions/${selected.id}/cancel`, { method: "POST", body: JSON.stringify({}) });
+      await Promise.all([executions.refresh(), detailQuery.refresh()]);
+    } catch {
+      // erro tratado no proximo ciclo de refresh
+    } finally {
+      setCancelling(false);
+    }
   }
-  return <><Header kicker="SCANNERS · HISTÓRICO" title="Execuções" copy="Resultado de cada janela, cobertura obtida, mudanças e estado dos motores." actions={<button className="btn ghost" onClick={() => void executions.refresh()}>Atualizar</button>} /><ErrorNotice message={executions.error} retry={executions.refresh} />
-    {executions.data?.length ? <div className="table-wrap"><table><thead><tr>{["Execução","Faixa","Perfil","Resultado","IPs ativos","Serviços","Críticas","Motores","Finalizada",""].map((head,index)=><th key={`${head}-${index}`}>{head}</th>)}</tr></thead><tbody>{executions.data.map(item=><tr key={item.id} className="clickable" onClick={()=>setSelectedId(item.id)}><td className="mono">{shortId(item.id,"SCAN-RUN")}</td><td><strong>{item.range_name}</strong><small className="mono">{item.cidr}</small></td><td>{item.profile_name}</td><td><Badge tone={statusTone(item.status)}>{statusLabel(item.status)}</Badge></td><td>{item.active_ips}</td><td>{item.services_discovered}</td><td>{item.critical_vulnerabilities}</td><td>{item.engine_runs.filter(run=>run.status==="completed").length}/{item.engine_runs.length || "—"}</td><td>{formatDate(item.finished_at || item.queued_at)}</td><td className="row-arrow">›</td></tr>)}</tbody></table></div> : <Empty title="Nenhuma execução registrada" copy="Execute um scanner manualmente ou crie um agendamento." />}
-    {selected && <div className="scrim" onMouseDown={()=>setSelectedId(null)}><aside className="drawer run-drawer" onMouseDown={event=>event.stopPropagation()}><div className="drawer-head"><div><span className="kicker mono">{shortId(selected.id,"SCAN-RUN")}</span><h2>Resultado da execução</h2></div><button onClick={()=>setSelectedId(null)}>×</button></div><div className="drawer-body"><div className="run-result"><Badge tone={statusTone(selected.status)}>{statusLabel(selected.status)}</Badge><strong>{selected.range_name}</strong><small className="mono">{selected.cidr} · {formatDate(selected.started_at)}–{formatDate(selected.finished_at)}</small></div><div className="result-metrics">{[["IPs ativos",selected.active_ips],["Serviços",selected.services_discovered],["Vulnerabilidades",selected.vulnerabilities_discovered],["Críticas",selected.critical_vulnerabilities]].map(item=><div key={item[0]}><span>{item[0]}</span><strong>{item[1]}</strong></div>)}</div><h3>Motores</h3>{selected.engine_runs.length ? selected.engine_runs.map(run=><div className="change" key={run.engine}><b className={statusTone(run.status)}>{run.status==="completed"?"✓":"!"}</b><span><strong>{run.engine}</strong> · {run.result_count} resultados{run.error_message?` · ${run.error_message}`:""}</span></div>) : <p>Aguardando o worker iniciar os motores.</p>}{selected.error_summary && <ErrorNotice message={selected.error_summary} />}</div><div className="drawer-foot">{["queued","running"].includes(selected.status)&&<button className="btn ghost" onClick={()=>void cancel()}>Cancelar execução</button>}<button className="btn ghost" onClick={()=>setSelectedId(null)}>Fechar</button><button className="btn primary" onClick={()=>go("scan-assets")}>Ver IPs e serviços</button></div></aside></div>}
-  </>;
+
+  return (
+    <>
+      <Header
+        kicker="SCANNERS · HISTÓRICO"
+        title="Execuções"
+        copy="Resultado de cada janela, cobertura obtida, mudanças e estado dos motores."
+        actions={
+          <button className="btn ghost" onClick={() => void Promise.all([executions.refresh(), detailQuery.refresh()])}>
+            Atualizar
+          </button>
+        }
+      />
+      <ErrorNotice message={executions.error} retry={executions.refresh} />
+      {executions.loading && !executions.data ? (
+        <div className="schedule-note"><Dot tone="info" /><span><strong>Carregando histórico de execuções…</strong></span></div>
+      ) : executions.data?.length ? (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                {["Execução", "Faixa", "Perfil", "Resultado", "IPs ativos", "Serviços", "Críticas", "Motores", "Finalizada", ""].map(
+                  (head, index) => (
+                    <th key={`${head}-${index}`}>{head}</th>
+                  )
+                )}
+              </tr>
+            </thead>
+            <tbody>
+              {executions.data.map(item => (
+                <tr key={item.id} className="clickable" onClick={() => setSelectedId(item.id)}>
+                  <td className="mono">{shortId(item.id, "SCAN-RUN")}</td>
+                  <td>
+                    <strong>{item.range_name}</strong>
+                    <small className="mono">{item.cidr}</small>
+                  </td>
+                  <td>{item.profile_name}</td>
+                  <td>
+                    <Badge tone={statusTone(item.status)}>{statusLabel(item.status)}</Badge>
+                  </td>
+                  <td>{item.active_ips}</td>
+                  <td>{item.services_discovered}</td>
+                  <td>{item.critical_vulnerabilities}</td>
+                  <td>
+                    {item.engine_runs.filter(run => run.status === "completed").length}/{item.engine_runs.length || "—"}
+                  </td>
+                  <td>{formatDate(item.finished_at || item.queued_at)}</td>
+                  <td className="row-arrow">›</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <Empty title="Nenhuma execução registrada" copy="Execute um scanner manualmente ou crie um agendamento." />
+      )}
+      {selected && (
+        <div className="scrim" onMouseDown={() => setSelectedId(null)}>
+          <aside className="drawer run-drawer" onMouseDown={event => event.stopPropagation()}>
+            <div className="drawer-head">
+              <div>
+                <span className="kicker mono">{shortId(selected.id, "SCAN-RUN")}</span>
+                <h2>Resultado da execução</h2>
+              </div>
+              <button onClick={() => setSelectedId(null)}>×</button>
+            </div>
+            <div className="drawer-body">
+              <div className="run-result">
+                <Badge tone={statusTone(selected.status)}>{statusLabel(selected.status)}</Badge>
+                <strong>{selected.range_name}</strong>
+                <small className="mono">
+                  {selected.cidr} · {formatDate(selected.started_at)}–{formatDate(selected.finished_at)}
+                </small>
+              </div>
+              <div className="result-metrics">
+                {[
+                  ["IPs ativos", selected.active_ips],
+                  ["Serviços", selected.services_discovered],
+                  ["Vulnerabilidades", selected.vulnerabilities_discovered],
+                  ["Críticas", selected.critical_vulnerabilities],
+                ].map(item => (
+                  <div key={item[0]}>
+                    <span>{item[0]}</span>
+                    <strong>{item[1]}</strong>
+                  </div>
+                ))}
+              </div>
+              <h3>Motores</h3>
+              {selected.engine_runs.length ? (
+                selected.engine_runs.map(run => (
+                  <div className="change" key={run.engine}>
+                    <b className={statusTone(run.status)}>{run.status === "completed" ? "✓" : "!"}</b>
+                    <span>
+                      <strong>{run.engine}</strong> · {run.result_count} resultados
+                      {run.error_message ? ` · ${run.error_message}` : ""}
+                    </span>
+                  </div>
+                ))
+              ) : (
+                <p>Aguardando o worker iniciar os motores.</p>
+              )}
+              {selected.error_summary && <ErrorNotice message={selected.error_summary} />}
+            </div>
+            <div className="drawer-foot">
+              {["queued", "running"].includes(selected.status) && (
+                <button className="btn ghost" disabled={cancelling || selected.cancellation_requested} onClick={() => void cancel()}>
+                  {cancelling || selected.cancellation_requested ? "Cancelando…" : "Cancelar execução"}
+                </button>
+              )}
+              <button className="btn ghost" onClick={() => setSelectedId(null)}>
+                Fechar
+              </button>
+              <button className="btn primary" onClick={() => go("scan-assets")}>
+                Ver IPs e serviços
+              </button>
+            </div>
+          </aside>
+        </div>
+      )}
+    </>
+  );
 }
 
 export function ScanAssets() {

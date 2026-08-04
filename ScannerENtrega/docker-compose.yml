@@ -95,6 +95,27 @@ services:
       retries: 5
     networks: [scanner_internal]
 
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://api:8000
+      SCANNER_API_KEY: ${SCANNER_API_KEY:?defina SCANNER_API_KEY}
+      SESSION_SECRET: ${SESSION_SECRET:?defina SESSION_SECRET}
+      SCANNER_AUTH_USER: ${SCANNER_AUTH_USER:?defina SCANNER_AUTH_USER}
+      SCANNER_AUTH_PASS: ${SCANNER_AUTH_PASS:?defina SCANNER_AUTH_PASS}
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r => process.exit(r.ok || r.status < 500 ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks: [scanner_internal]
+
 networks:
   scanner_internal:
     driver: bridge
