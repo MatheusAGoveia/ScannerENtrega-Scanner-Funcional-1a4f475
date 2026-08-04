@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,7 +14,10 @@ class Settings(BaseSettings):
     )
 
     environment: str = "development"
-    database_url: str = "sqlite:///./scanner.db"
+    database_url: str = Field(
+        default="sqlite:///./scanner.db",
+        validation_alias=AliasChoices("DATABASE_URL", "SCANNER_DATABASE_URL"),
+    )
     api_key: SecretStr = SecretStr("development-only-change-me")
     allow_public_targets: bool = False
     max_addresses_per_range: int = Field(default=4096, ge=1, le=65536)

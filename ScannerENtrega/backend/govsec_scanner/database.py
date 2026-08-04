@@ -1,3 +1,4 @@
+import re
 from collections.abc import Generator
 
 from sqlalchemy import create_engine
@@ -8,6 +9,10 @@ from govsec_scanner.config import get_settings
 
 class Base(DeclarativeBase):
     pass
+
+
+def sanitize_db_url(url: str) -> str:
+    return re.sub(r"://([^:]+):([^@]+)@", r"://\1:[redacted]@", url)
 
 
 def _engine_kwargs(database_url: str) -> dict[str, object]:

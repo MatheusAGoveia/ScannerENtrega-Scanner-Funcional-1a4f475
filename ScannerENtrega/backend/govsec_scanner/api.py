@@ -100,14 +100,16 @@ def live() -> dict[str, str]:
 
 @app.get("/health/ready")
 def ready(db: Session = Depends(get_db)) -> dict[str, object]:
-    db.execute(select(1)).scalar_one()
+    try:
+        db.execute(select(1)).scalar_one()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Banco de dados indisponivel.") from exc
+
     nmap_ok = engine_version(settings.nmap_binary) is not None
     nuclei_ok = not settings.nuclei_enabled or (
         engine_version(settings.nuclei_binary) is not None
         and settings.nuclei_templates_dir.exists()
     )
-    if settings.production and (not nmap_ok or not nuclei_ok):
-        raise HTTPException(status_code=503, detail="Motores obrigatorios indisponiveis.")
     return {"status": "ready", "database": "ok", "nmap": nmap_ok, "nuclei": nuclei_ok}
 
 
