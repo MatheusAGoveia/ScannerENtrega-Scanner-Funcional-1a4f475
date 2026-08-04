@@ -3,7 +3,7 @@ import logging
 import time
 
 from govsec_scanner.config import get_settings
-from govsec_scanner.database import SessionLocal, init_database
+from govsec_scanner.database import SessionLocal, check_database_ready
 from govsec_scanner.services import (
     claim_next_execution,
     execute_scan,
@@ -15,8 +15,10 @@ from govsec_scanner.services import (
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     settings = get_settings()
-    init_database()
     with SessionLocal() as db:
+        if not check_database_ready(db):
+            logging.error("Banco de dados nao possui a migration correta aplicada. Abortando.")
+            raise RuntimeError("Banco de dados sem migration aplicada.")
         seed_profiles(db)
         recovered = recover_stale_executions(db, settings.worker_stale_timeout_seconds)
         if recovered:

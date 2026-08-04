@@ -33,7 +33,7 @@ services:
 
   migrations:
     build: ./backend
-    command: ["python", "-c", "from govsec_scanner.database import init_database; init_database(); print('Migrations versionadas alembic executadas com sucesso!')"]
+    command: ["python", "-m", "alembic", "upgrade", "head"]
     environment: *backend-environment
     depends_on:
       postgres:

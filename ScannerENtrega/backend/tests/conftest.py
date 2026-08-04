@@ -1,4 +1,7 @@
-from __future__ import annotations
+import os
+
+os.environ.setdefault("DATABASE_URL", "sqlite:///./scanner.db")
+os.environ.setdefault("SCANNER_API_KEY", "test-api-key-with-at-least-24-chars")
 
 import pytest
 

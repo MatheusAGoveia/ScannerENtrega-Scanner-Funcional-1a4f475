@@ -14,8 +14,8 @@ class Settings(BaseSettings):
     )
 
     environment: str = "development"
-    database_url: str = Field(
-        default="sqlite:///./scanner.db",
+    database_url: str | None = Field(
+        default=None,
         validation_alias=AliasChoices("DATABASE_URL", "SCANNER_DATABASE_URL"),
     )
     api_key: SecretStr = SecretStr("development-only-change-me")
@@ -43,17 +43,16 @@ class Settings(BaseSettings):
             raise ValueError("SCANNER_API_KEY deve possuir no minimo 24 caracteres")
         return value
 
-    @field_validator("database_url")
-    @classmethod
-    def validate_database_url(cls, value: str) -> str:
-        if not value or value.strip() == "":
-            raise ValueError("DATABASE_URL nao pode ser vazia")
-        return value
-
     @model_validator(mode="after")
-    def validate_production_database(self) -> "Settings":
+    def validate_database_config(self) -> "Settings":
+        if not self.database_url or not self.database_url.strip():
+            raise ValueError(
+                "DATABASE_URL nao configurada. Defina DATABASE_URL no ambiente ou arquivo .env."
+            )
         if self.production and self.database_url.startswith("sqlite"):
-            raise ValueError("DATABASE_URL com SQLite nao e permitida em ambiente de producao.")
+            raise ValueError(
+                "DATABASE_URL com SQLite nao e permitida em ambiente de producao."
+            )
         return self
 
     @property

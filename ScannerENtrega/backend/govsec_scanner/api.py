@@ -26,7 +26,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from govsec_scanner.config import get_settings
-from govsec_scanner.database import get_db, init_database
+from govsec_scanner.database import (
+    get_current_migration_version,
+    get_db,
+    get_expected_migration_head,
+)
 from govsec_scanner.importers import ImportValidationError, parse_import_file
 from govsec_scanner.models import (
     AuditLog,
@@ -68,11 +72,11 @@ from govsec_scanner.services import audit, engine_version, next_cron_run, seed_p
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
-    init_database()
-    from govsec_scanner.database import SessionLocal
+    from govsec_scanner.database import SessionLocal, check_database_ready
 
     with SessionLocal() as db:
-        seed_profiles(db)
+        if check_database_ready(db):
+            seed_profiles(db)
     yield
 
 
@@ -105,10 +109,20 @@ def ready(db: Session = Depends(get_db)) -> dict[str, object]:
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Banco de dados indisponivel.") from exc
 
-    try:
-        db.execute(select(ScannerProfile.id).limit(1)).scalars().all()
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail="Migrations nao aplicadas no banco de dados.") from exc
+    current_version = get_current_migration_version(db)
+    expected_version = get_expected_migration_head()
+
+    if not current_version:
+        raise HTTPException(
+            status_code=503,
+            detail="Tabela alembic_version ausente ou sem migrations aplicadas.",
+        )
+
+    if current_version != expected_version:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Migration desatualizada: versao aplicada '{current_version}' != esperada '{expected_version}'.",
+        )
 
     nmap_ok = engine_version(settings.nmap_binary) is not None
     nuclei_ok = not settings.nuclei_enabled or (
@@ -122,7 +136,13 @@ def ready(db: Session = Depends(get_db)) -> dict[str, object]:
             detail=f"Motores obrigatorios indisponiveis (nmap={nmap_ok}, nuclei={nuclei_ok}).",
         )
 
-    return {"status": "ready", "database": "ok", "nmap": nmap_ok, "nuclei": nuclei_ok}
+    return {
+        "status": "ready",
+        "database": "ok",
+        "migration_version": current_version,
+        "nmap": nmap_ok,
+        "nuclei": nuclei_ok,
+    }
 
 
 @app.get("/metrics")
