@@ -31,7 +31,8 @@ export async function proxy(request: NextRequest, context: { params: Promise<{ p
     );
   }
 
-  if (session.role === "forbidden") {
+  const ALLOWED_ROLES = new Set(["operator", "admin"]);
+  if (!ALLOWED_ROLES.has(session.role)) {
     return NextResponse.json(
       { detail: "Acesso negado para o perfil do usuario." },
       { status: 403 }

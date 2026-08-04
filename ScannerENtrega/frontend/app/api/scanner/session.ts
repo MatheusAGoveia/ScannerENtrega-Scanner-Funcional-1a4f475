@@ -8,8 +8,6 @@ export interface SessionData {
   exp: number;
 }
 
-const ALLOWED_ROLES = new Set(["operator", "admin"]);
-
 function getSessionSecret(): string | null {
   const secret = process.env.SESSION_SECRET;
   if (!secret || secret.trim() === "") {
@@ -85,7 +83,6 @@ export function parseSession(token: string | undefined | null): SessionData | nu
       return null;
     }
     if (now >= data.exp) return null;
-    if (!ALLOWED_ROLES.has(data.role)) return null;
 
     return data;
   } catch {

@@ -1,9 +1,16 @@
 import { NextRequest, NextResponse } from "next/server.js";
-import { setSessionCookie, signSession, validateCredentials } from "../session.ts";
+import { isOriginAllowed, setSessionCookie, signSession, validateCredentials } from "../session.ts";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
+  if (!isOriginAllowed(request)) {
+    return NextResponse.json(
+      { detail: "Origem nao autorizada (CSRF protection)." },
+      { status: 403 }
+    );
+  }
+
   try {
     const body = (await request.json()) as { username?: string; password?: string };
     const validation = validateCredentials(body.username, body.password);

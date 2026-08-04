@@ -303,11 +303,10 @@ def _persist_findings(
 
 def _sanitize_error_message(exc: Exception) -> str:
     msg = str(exc)
-    for token in msg.split():
-        if "/" in token or "\\" in token or "Traceback" in token:
-            msg = msg.replace(token, "[redacted]")
-    clean = re.sub(r"(key|secret|token|pass)=\S+", r"\1=[redacted]", msg, flags=re.IGNORECASE)
-    return clean[:2000] or "Falha no processamento da execucao."
+    msg = re.sub(r"(?:[a-zA-Z]:\\|[/\\])[\w\-./\\]+", "[path-redacted]", msg)
+    msg = re.sub(r"Traceback.*", "[traceback-redacted]", msg, flags=re.DOTALL)
+    msg = re.sub(r"(key|secret|token|pass|password|auth|authorization)=\S+", r"\1=[redacted]", msg, flags=re.IGNORECASE)
+    return msg[:2000].strip() or "Falha no processamento da execucao."
 
 
 async def _periodic_heartbeat(
@@ -325,12 +324,17 @@ async def _periodic_heartbeat(
         except asyncio.CancelledError:
             break
         except Exception as exc:
-            logger.warning("Falha ao atualizar heartbeat para execucao %s: %s", execution_id, exc)
+            logger.warning("Falha ao atualizar heartbeat para execucao %s: %s", execution_id, _sanitize_error_message(exc))
 
 
-async def execute_scan(db: Session, execution_id: str, settings: Settings | None = None) -> None:
+async def execute_scan(
+    db: Session,
+    execution_id: str,
+    settings: Settings | None = None,
+    hb_interval_override: float | None = None,
+) -> None:
     settings = settings or get_settings()
-    hb_interval = max(0.5, settings.worker_stale_timeout_seconds / 4.0)
+    hb_interval = hb_interval_override or max(0.5, settings.worker_stale_timeout_seconds / 4.0)
     stop_event = asyncio.Event()
     heartbeat_task = asyncio.create_task(_periodic_heartbeat(execution_id, hb_interval, stop_event))
 
@@ -540,34 +544,41 @@ async def execute_scan(db: Session, execution_id: str, settings: Settings | None
     except Exception as exc:
         sanitized_msg = _sanitize_error_message(exc)
         logger.error("Falha na execucao %s: %s", execution_id, sanitized_msg)
-        db.rollback()
-        execution_post = db.scalar(select(ScanExecution).where(ScanExecution.id == execution_id))
-        if execution_post is not None:
-            running_engine = db.scalar(
-                select(EngineRun).where(
-                    EngineRun.execution_id == execution_post.id,
-                    EngineRun.status == "running",
-                )
-            )
-            if running_engine:
-                _finish_engine(db, running_engine, status="failed", error=sanitized_msg)
+        with suppress(Exception):
+            db.rollback()
 
-            if hosts:
-                execution_post.status = "partially_completed"
-            else:
-                execution_post.status = "failed"
+        try:
+            bind_engine = db.get_bind()
+            with Session(bind=bind_engine) as fail_db:
+                execution_post = fail_db.scalar(select(ScanExecution).where(ScanExecution.id == execution_id))
+                if execution_post is not None:
+                    running_engine = fail_db.scalar(
+                        select(EngineRun).where(
+                            EngineRun.execution_id == execution_post.id,
+                            EngineRun.status == "running",
+                        )
+                    )
+                    if running_engine:
+                        _finish_engine(fail_db, running_engine, status="failed", error=sanitized_msg)
 
-            execution_post.error_summary = sanitized_msg[:4000]
-            execution_post.finished_at = utcnow()
-            audit(
-                db,
-                "scan.execution.failed",
-                "scan_execution",
-                execution_post.requested_by,
-                resource_id=execution_post.id,
-                details={"status": execution_post.status, "error": sanitized_msg[:2000]},
-            )
-            db.commit()
+                    if hosts:
+                        execution_post.status = "partially_completed"
+                    else:
+                        execution_post.status = "failed"
+
+                    execution_post.error_summary = sanitized_msg[:4000]
+                    execution_post.finished_at = utcnow()
+                    audit(
+                        fail_db,
+                        "scan.execution.failed",
+                        "scan_execution",
+                        execution_post.requested_by,
+                        resource_id=execution_post.id,
+                        details={"status": execution_post.status, "error": sanitized_msg[:2000]},
+                    )
+                    fail_db.commit()
+        except Exception as db_exc:
+            logger.warning("Nao foi possivel persistir estado de falha para execucao %s: %s", execution_id, _sanitize_error_message(db_exc))
     finally:
         stop_event.set()
         heartbeat_task.cancel()

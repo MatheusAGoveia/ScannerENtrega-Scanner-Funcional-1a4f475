@@ -542,8 +542,8 @@ def test_heartbeat_renewal_and_task_cleanup_during_execution(tmp_path: Path, mon
         # Use valid stale timeout (ge=10.0)
         settings = Settings(api_key="test-api-key-with-at-least-24-chars", worker_stale_timeout_seconds=10.0)
 
-        # Execute scan which runs the heartbeat loop task
-        asyncio.run(execute_scan(db, execution_id, settings))
+        # Execute scan with short 50ms heartbeat interval to exercise periodic loop
+        asyncio.run(execute_scan(db, execution_id, settings, hb_interval_override=0.05))
 
         updated = db.get(ScanExecution, execution_id)
         assert updated is not None

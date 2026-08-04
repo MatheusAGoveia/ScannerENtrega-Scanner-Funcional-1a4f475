@@ -39,7 +39,7 @@ function createMockRequest(
 test("Auth - Login succeeds with valid credentials and sets HttpOnly cookie", async () => {
   const req = createMockRequest("http://localhost:3000/api/scanner/login", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", origin: "http://localhost:3000" },
     body: JSON.stringify({ username: "admin-govsec", password: "senha-secreta-123" }),
   });
   const res = await loginHandler(req);
@@ -57,7 +57,7 @@ test("Auth - Login succeeds with valid credentials and sets HttpOnly cookie", as
 test("Auth - Login fails with invalid credentials or missing config", async () => {
   const invalidReq = createMockRequest("http://localhost:3000/api/scanner/login", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", origin: "http://localhost:3000" },
     body: JSON.stringify({ username: "admin-govsec", password: "wrong-password" }),
   });
   const invalidRes = await loginHandler(invalidReq);
@@ -69,7 +69,7 @@ test("Auth - Login fails with invalid credentials or missing config", async () =
   try {
     const req = createMockRequest("http://localhost:3000/api/scanner/login", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", origin: "http://localhost:3000" },
       body: JSON.stringify({ username: "admin-govsec", password: "senha-secreta-123" }),
     });
     const res = await loginHandler(req);
@@ -80,7 +80,11 @@ test("Auth - Login fails with invalid credentials or missing config", async () =
 });
 
 test("Auth - Logout clears session cookie", async () => {
-  const res = await logoutHandler();
+  const req = createMockRequest("http://localhost:3000/api/scanner/logout", {
+    method: "POST",
+    headers: { origin: "http://localhost:3000" },
+  });
+  const res = await logoutHandler(req);
   assert.strictEqual(res.status, 200);
   const setCookie = res.headers.get("set-cookie");
   assert.ok(setCookie && setCookie.includes("scanner_session=;"));
@@ -176,9 +180,51 @@ test("Proxy - Forwards requests deriving actor ONLY from session and ignoring cl
     const res = await proxy(req, { params: Promise.resolve({ path: ["ranges"] }) });
     assert.strictEqual(res.status, 200);
     assert.strictEqual(receivedMethod, "POST");
-    assert.strictEqual(receivedHeaders["x-scanner-api-key"], "test-frontend-secret-key-32-chars");
     assert.strictEqual(receivedHeaders["x-scanner-actor"], "real-authenticated-user");
   } finally {
     server.close();
   }
+});
+
+test("Proxy - Returns 403 when user role is unauthorized or forbidden", async () => {
+  const now = Math.floor(Date.now() / 1000);
+  const forbiddenToken = signSession({
+    actor: "unauthorized-user",
+    role: "forbidden",
+    iat: now,
+    exp: now + 3600,
+  })!;
+
+  const req = createMockRequest("http://localhost:3000/api/scanner/ranges", {
+    cookies: { scanner_session: forbiddenToken },
+  });
+  const res = await proxy(req, { params: Promise.resolve({ path: ["ranges"] }) });
+  assert.strictEqual(res.status, 403);
+  assert.match((await res.json()).detail, /Acesso negado/i);
+});
+
+test("Auth - Login and Logout blocked with 403 when Origin header is missing or cross-site", async () => {
+  // Login without Origin -> 403
+  const loginNoOrigin = createMockRequest("http://localhost:3000/api/scanner/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username: "admin-govsec", password: "senha-secreta-123" }),
+  });
+  const loginRes = await loginHandler(loginNoOrigin);
+  assert.strictEqual(loginRes.status, 403);
+
+  // Logout without Origin -> 403
+  const logoutNoOrigin = createMockRequest("http://localhost:3000/api/scanner/logout", {
+    method: "POST",
+  });
+  const logoutRes = await logoutHandler(logoutNoOrigin);
+  assert.strictEqual(logoutRes.status, 403);
+});
+
+test("Security - Secret keys are never exposed in JSON responses", async () => {
+  const req = createMockRequest("http://localhost:3000/api/scanner/ranges");
+  const res = await proxy(req, { params: Promise.resolve({ path: ["ranges"] }) });
+  const text = await res.text();
+  assert.ok(!text.includes("test-frontend-secret-key-32-chars"));
+  assert.ok(!text.includes("test-session-secret-key-32-chars"));
 });

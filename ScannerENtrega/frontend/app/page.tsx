@@ -210,12 +210,114 @@ function Empty({ title, copy }: { title: string; copy: string }) {
   return <div className="empty"><span>◇</span><h2>{title}</h2><p>{copy}</p></div>;
 }
 
+function LoginForm({ onLoginSuccess }: { onLoginSuccess: (actor: string) => void }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+    try {
+      const res = await fetch("/api/scanner/login", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Origin": typeof window !== "undefined" ? window.location.origin : "http://localhost:3000",
+        },
+        body: JSON.stringify({ username, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.detail || "Credenciais invalidas ou configuracao ausente.");
+      } else {
+        onLoginSuccess(data.actor || username);
+      }
+    } catch {
+      setError("Erro ao conectar ao servidor de autenticacao.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="login-preview" style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div className="login-brand">
+        <span>✓</span>
+        <div><strong>GOVSEC</strong><small>SHIELD</small></div>
+        <p>Operação de segurança institucional</p>
+      </div>
+      <form className="login-box" onSubmit={handleSubmit} data-testid="login-form">
+        <span className="kicker">ACESSO CONTROLADO</span>
+        <h2>Entrar na plataforma</h2>
+        <p>Use sua identidade institucional da Prefeitura de Betim.</p>
+        {error && (
+          <div className="notice" data-testid="login-error" style={{ color: "#ef4444", marginBottom: "1rem", fontSize: "0.875rem" }}>
+            <Dot tone="danger" /> <span>{error}</span>
+          </div>
+        )}
+        <label className="field">
+          <span>Usuário</span>
+          <input
+            type="text"
+            data-testid="username-input"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            placeholder="nome.sobrenome"
+            required
+          />
+        </label>
+        <label className="field">
+          <span>Senha</span>
+          <input
+            type="password"
+            data-testid="password-input"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="••••••••••••"
+            required
+          />
+        </label>
+        <button className="btn primary full" type="submit" data-testid="submit-login" disabled={loading}>
+          {loading ? "Entrando..." : "Entrar"}
+        </button>
+        <small>Uso monitorado e sujeito à política de segurança municipal.</small>
+      </form>
+    </div>
+  );
+}
+
 export default function Home() {
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [userActor, setUserActor] = useState<string>("Rafael Souza");
   const [page, setPage] = useState<Page>("scanners");
   const [mobileNav, setMobileNav] = useState(false);
+
   const title = useMemo(() => nav.flatMap(group => group.items).find(item => item[0] === page)?.[2] ?? "Detalhe do incidente", [page]);
   const go = (next: Page) => { setPage(next); setMobileNav(false); window.scrollTo({ top: 0, behavior: "smooth" }); };
-  return <div className={`app ${page === "privileged" ? "restricted-mode" : ""}`}>
+
+  const handleLogout = async () => {
+    try {
+      await fetch("/api/scanner/logout", {
+        method: "POST",
+        headers: {
+          "Origin": typeof window !== "undefined" ? window.location.origin : "http://localhost:3000",
+        },
+      });
+    } catch {
+      // Ignore network errors on logout
+    } finally {
+      setIsAuthenticated(false);
+    }
+  };
+
+  if (!isAuthenticated) {
+    return <LoginForm onLoginSuccess={(actor) => { setUserActor(actor); setIsAuthenticated(true); }} />;
+  }
+
+  return <div className={`app ${page === "privileged" ? "restricted-mode" : ""}`} data-testid="scanner-app">
     <aside className={`sidebar ${mobileNav ? "open" : ""}`}>
       <div className="brand"><span>✓</span><div><strong>GOVSEC</strong><small>SHIELD</small></div><Badge>Wireframe</Badge></div>
       <button className="tenant"><b>PB</b><span><strong>Prefeitura de Betim</strong><small>Produção · tenant único</small></span><i>›</i></button>
@@ -224,7 +326,7 @@ export default function Home() {
     </aside>
     {mobileNav && <button className="nav-scrim" onClick={() => setMobileNav(false)} />}
     <div className="main">
-      <header className="top"><div><button className="hamburger" onClick={() => setMobileNav(true)}>☰</button><span>GovSec <b>/</b> {title}</span></div><div><button className="global-search">⌕ <span>Buscar em toda a plataforma</span><kbd>Ctrl K</kbd></button><button className="notify">AL<i>3</i></button><button className="user"><b>RS</b><span><strong>Rafael Souza</strong><small>Operador SOC</small></span><i>›</i></button></div></header>
+      <header className="top"><div><button className="hamburger" onClick={() => setMobileNav(true)}>☰</button><span>GovSec <b>/</b> {title}</span></div><div><button className="global-search">⌕ <span>Buscar em toda a plataforma</span><kbd>Ctrl K</kbd></button><button className="notify">AL<i>3</i></button><button className="user" data-testid="logout-btn" onClick={handleLogout}><b>RS</b><span><strong>{userActor}</strong><small>Sair da plataforma</small></span><i>›</i></button></div></header>
       <main className="content">
         {page === "command" && <Command go={go} />}
         {page === "incidents" && <Incidents go={go} />}
