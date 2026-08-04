@@ -497,3 +497,62 @@ def test_post_claim_failure_marks_execution_failed(tmp_path: Path, monkeypatch: 
         assert "nao possui autorizacao ativa" in (updated.error_summary or "")
 
     engine.dispose()
+
+
+def test_heartbeat_renewal_and_task_cleanup_during_execution(tmp_path: Path, monkeypatch: object) -> None:
+    db_file = tmp_path / "hb_test.db"
+    engine, Session = _init_test_db(db_file)
+
+    async def delayed_nmap_mock(*args: object, **kwargs: object) -> list[HostObservation]:
+        await asyncio.sleep(0.1)
+        return []
+
+    monkeypatch.setattr(NmapEngine, "scan", delayed_nmap_mock)
+
+    with Session() as db:
+        seed_profiles(db)
+        profile = db.scalar(select(ScannerProfile).where(ScannerProfile.slug == "availability"))
+        assert profile is not None
+        range_item = AuthorizedRange(
+            name="Faixa Heartbeat",
+            cidr="10.90.0.0/24",
+            address_count=256,
+            environment="Teste",
+            owner="Dev",
+            authorization_reference="AUT-HB-001",
+        )
+        db.add(range_item)
+        db.flush()
+
+        initial_hb = utcnow() - timedelta(seconds=10)
+        execution = ScanExecution(
+            range_id=range_item.id,
+            profile_id=profile.id,
+            status="running",
+            started_at=utcnow(),
+            heartbeat_at=initial_hb,
+            trigger_type="manual",
+            requested_by="tester",
+            justification="Teste de renovacao automatica de heartbeat.",
+        )
+        db.add(execution)
+        db.commit()
+        execution_id = execution.id
+
+        # Use valid stale timeout (ge=10.0)
+        settings = Settings(api_key="test-api-key-with-at-least-24-chars", worker_stale_timeout_seconds=10.0)
+
+        # Execute scan which runs the heartbeat loop task
+        asyncio.run(execute_scan(db, execution_id, settings))
+
+        updated = db.get(ScanExecution, execution_id)
+        assert updated is not None
+        assert updated.status == "completed"
+        assert updated.heartbeat_at is not None
+        assert updated.heartbeat_at > initial_hb
+
+        # Confirm active worker recovery DOES NOT recover this execution
+        recovered = recover_stale_executions(db, stale_timeout_seconds=300.0)
+        assert recovered == 0
+
+    engine.dispose()

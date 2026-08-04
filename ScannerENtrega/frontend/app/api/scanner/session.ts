@@ -1,35 +1,75 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { NextRequest } from "next/server.js";
+import { NextRequest, NextResponse } from "next/server.js";
 
 export interface SessionData {
   actor: string;
   role: string;
-  exp?: number;
+  iat: number;
+  exp: number;
 }
 
-function getSecret(): string {
-  return (
-    process.env.SESSION_SECRET ||
-    process.env.SCANNER_API_KEY ||
-    "dev-session-secret-change-in-prod-2026"
-  );
+const ALLOWED_ROLES = new Set(["operator", "admin"]);
+
+function getSessionSecret(): string | null {
+  const secret = process.env.SESSION_SECRET;
+  if (!secret || secret.trim() === "") {
+    return null;
+  }
+  return secret;
 }
 
-export function signSession(data: SessionData): string {
-  const secret = getSecret();
+function safeCompare(a: string, b: string): boolean {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) {
+    timingSafeEqual(bufA, bufA);
+    return false;
+  }
+  return timingSafeEqual(bufA, bufB);
+}
+
+export function validateCredentials(
+  username?: string,
+  password?: string
+): { success: boolean; actor?: string; role?: string; error?: string } {
+  const expectedUser = process.env.SCANNER_AUTH_USER;
+  const expectedPass = process.env.SCANNER_AUTH_PASS;
+  const secret = getSessionSecret();
+
+  if (!secret || !expectedUser || !expectedPass) {
+    return { success: false, error: "Autenticacao nao configurada no servidor." };
+  }
+
+  if (!username || !password) {
+    return { success: false, error: "Usuario e senha sao obrigatorios." };
+  }
+
+  const userOk = safeCompare(username, expectedUser);
+  const passOk = safeCompare(password, expectedPass);
+
+  if (userOk && passOk) {
+    return { success: true, actor: username, role: "operator" };
+  }
+  return { success: false, error: "Credenciais invalidas." };
+}
+
+export function signSession(data: SessionData): string | null {
+  const secret = getSessionSecret();
+  if (!secret) return null;
   const payload = Buffer.from(JSON.stringify(data)).toString("base64url");
   const signature = createHmac("sha256", secret).update(payload).digest("base64url");
   return `${payload}.${signature}`;
 }
 
 export function parseSession(token: string | undefined | null): SessionData | null {
-  if (!token || !token.includes(".")) return null;
+  const secret = getSessionSecret();
+  if (!secret || !token || !token.includes(".")) return null;
+
   const parts = token.split(".");
   if (parts.length !== 2) return null;
   const [payload, signature] = parts;
   if (!payload || !signature) return null;
 
-  const secret = getSecret();
   const expectedSig = createHmac("sha256", secret).update(payload).digest("base64url");
 
   if (signature.length !== expectedSig.length) return null;
@@ -39,7 +79,14 @@ export function parseSession(token: string | undefined | null): SessionData | nu
 
   try {
     const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf-8")) as SessionData;
-    if (data.exp && Date.now() / 1000 > data.exp) return null;
+    const now = Math.floor(Date.now() / 1000);
+
+    if (!data.actor || !data.role || typeof data.iat !== "number" || typeof data.exp !== "number") {
+      return null;
+    }
+    if (now >= data.exp) return null;
+    if (!ALLOWED_ROLES.has(data.role)) return null;
+
     return data;
   } catch {
     return null;
@@ -48,47 +95,49 @@ export function parseSession(token: string | undefined | null): SessionData | nu
 
 export function getSessionFromRequest(request: NextRequest): SessionData | null {
   const cookie = request.cookies.get("scanner_session")?.value;
-  if (cookie) {
-    const parsed = parseSession(cookie);
-    if (parsed) return parsed;
-  }
-  const authHeader = request.headers.get("Authorization");
-  if (authHeader && authHeader.startsWith("Bearer ")) {
-    const token = authHeader.slice(7).trim();
-    const parsed = parseSession(token);
-    if (parsed) return parsed;
-  }
-  // In development, if no explicit cookie is set, fallback to default operator session
-  if (process.env.NODE_ENV !== "production" && process.env.DISABLE_DEV_FALLBACK !== "true") {
-    return { actor: "operador-web", role: "operator" };
-  }
-  return null;
+  if (!cookie) return null;
+  return parseSession(cookie);
 }
 
 export function isOriginAllowed(request: NextRequest): boolean {
   if (["GET", "HEAD", "OPTIONS"].includes(request.method)) return true;
 
-  const secFetchSite = request.headers.get("sec-fetch-site");
-  if (secFetchSite === "cross-site") return false;
-
   const origin = request.headers.get("origin");
-  const referer = request.headers.get("referer");
   const host = request.headers.get("host") || request.nextUrl?.host;
 
-  if (origin) {
-    try {
-      const originHost = new URL(origin).host;
-      if (host && originHost !== host) return false;
-    } catch {
-      return false;
-    }
-  } else if (referer) {
-    try {
-      const refererHost = new URL(referer).host;
-      if (host && refererHost !== host) return false;
-    } catch {
-      return false;
-    }
+  if (!origin) return false;
+
+  try {
+    const originHost = new URL(origin).host;
+    if (!host || originHost !== host) return false;
+  } catch {
+    return false;
   }
   return true;
+}
+
+export function setSessionCookie(response: NextResponse, token: string): void {
+  const isProd = process.env.NODE_ENV === "production";
+  response.cookies.set({
+    name: "scanner_session",
+    value: token,
+    httpOnly: true,
+    sameSite: "strict",
+    secure: isProd,
+    path: "/",
+    maxAge: 28800,
+  });
+}
+
+export function clearSessionCookie(response: NextResponse): void {
+  const isProd = process.env.NODE_ENV === "production";
+  response.cookies.set({
+    name: "scanner_session",
+    value: "",
+    httpOnly: true,
+    sameSite: "strict",
+    secure: isProd,
+    path: "/",
+    maxAge: 0,
+  });
 }

@@ -86,8 +86,8 @@ class BannerEngine:
                         },
                         separators=(",", ":"),
                     )
-            except (ssl.SSLError, ssl.CertificateError, OSError):
-                # Fallback: Second unverified connection attempted ONLY after strict validation fails
+            except (ssl.SSLCertVerificationError, ssl.CertificateError):
+                # Fallback: Second unverified connection attempted ONLY for specific certificate validation errors
                 unverified_context = ssl.create_default_context()
                 unverified_context.check_hostname = False
                 unverified_context.verify_mode = ssl.CERT_NONE
@@ -114,6 +114,9 @@ class BannerEngine:
                             )
                 except (TimeoutError, OSError, ssl.SSLError):
                     return None, None
+            except (TimeoutError, OSError, ssl.SSLError):
+                # Generic network/OS/timeout errors DO NOT trigger fallback
+                return None, None
         else:
             reader, writer = await asyncio.open_connection(
                 ip_address,

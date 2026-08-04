@@ -178,3 +178,23 @@ def test_tls_verification_is_strict_by_default() -> None:
     ctx = ssl.create_default_context()
     assert ctx.check_hostname is True
     assert ctx.verify_mode == ssl.CERT_REQUIRED
+
+
+def test_tls_fallback_only_on_cert_error(monkeypatch: object) -> None:
+    open_conn_calls: list[dict[str, object]] = []
+
+    async def mock_open_connection(host: str, port: int, ssl: object = None, server_hostname: object = None) -> None:
+        open_conn_calls.append({"host": host, "port": port, "ssl": ssl, "server_hostname": server_hostname})
+        # Simulate a generic network/OS error (e.g. ConnectionRefusedError)
+        raise OSError("Connection refused")
+
+    monkeypatch.setattr(asyncio, "open_connection", mock_open_connection)
+
+    service = ServiceObservation(protocol="tcp", port=443, service_name="https")
+    host = HostObservation(ip_address="127.0.0.1", services=[service])
+
+    count = asyncio.run(BannerEngine().enrich([host], timeout_seconds=2, max_parallelism=1))
+    assert count == 0
+    # Exactly ONE connection attempt made; NO unverified fallback attempted for generic OSError
+    assert len(open_conn_calls) == 1
+    assert open_conn_calls[0]["server_hostname"] == "127.0.0.1"

@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import shutil
 import subprocess
 from contextlib import suppress
@@ -300,6 +301,15 @@ def _persist_findings(
     return count
 
 
+def _sanitize_error_message(exc: Exception) -> str:
+    msg = str(exc)
+    for token in msg.split():
+        if "/" in token or "\\" in token or "Traceback" in token:
+            msg = msg.replace(token, "[redacted]")
+    clean = re.sub(r"(key|secret|token|pass)=\S+", r"\1=[redacted]", msg, flags=re.IGNORECASE)
+    return clean[:2000] or "Falha no processamento da execucao."
+
+
 async def _periodic_heartbeat(
     execution_id: str, interval_seconds: float, stop_event: asyncio.Event
 ) -> None:
@@ -320,17 +330,6 @@ async def _periodic_heartbeat(
 
 async def execute_scan(db: Session, execution_id: str, settings: Settings | None = None) -> None:
     settings = settings or get_settings()
-    execution = db.scalar(
-        select(ScanExecution)
-        .options(
-            selectinload(ScanExecution.authorized_range),
-            selectinload(ScanExecution.profile),
-        )
-        .where(ScanExecution.id == execution_id)
-    )
-    if execution is None or execution.status != "running":
-        return
-
     hb_interval = max(0.5, settings.worker_stale_timeout_seconds / 4.0)
     stop_event = asyncio.Event()
     heartbeat_task = asyncio.create_task(_periodic_heartbeat(execution_id, hb_interval, stop_event))
@@ -339,6 +338,20 @@ async def execute_scan(db: Session, execution_id: str, settings: Settings | None
     hosts: list[HostObservation] = []
 
     try:
+        execution = db.scalar(
+            select(ScanExecution)
+            .options(
+                selectinload(ScanExecution.authorized_range),
+                selectinload(ScanExecution.profile),
+            )
+            .where(ScanExecution.id == execution_id)
+        )
+        if execution is None or execution.status != "running":
+            return
+
+        if not execution.authorized_range or not execution.profile:
+            raise EngineExecutionError("Faixa autorizada ou perfil nao encontrados.")
+
         scope = validate_scope(
             execution.authorized_range.cidr,
             max_addresses=settings.max_addresses_per_range,
@@ -430,8 +443,9 @@ async def execute_scan(db: Session, execution_id: str, settings: Settings | None
                 _persist_findings(db, execution, findings)
                 _finish_engine(db, nuclei_run, status="completed", result_count=len(findings))
             except (EngineUnavailable, EngineExecutionError) as exc:
-                partial_errors.append(str(exc))
-                _finish_engine(db, nuclei_run, status="failed", error=str(exc))
+                sanitized = _sanitize_error_message(exc)
+                partial_errors.append(sanitized)
+                _finish_engine(db, nuclei_run, status="failed", error=sanitized)
 
         if sync_zabbix:
             zabbix_run = _engine_run(db, execution, "zabbix")
@@ -450,8 +464,9 @@ async def execute_scan(db: Session, execution_id: str, settings: Settings | None
                 db.commit()
                 _finish_engine(db, zabbix_run, status="completed", result_count=result.linked)
             except ZabbixError as exc:
-                partial_errors.append(str(exc))
-                _finish_engine(db, zabbix_run, status="failed", error=str(exc))
+                sanitized = _sanitize_error_message(exc)
+                partial_errors.append(sanitized)
+                _finish_engine(db, zabbix_run, status="failed", error=sanitized)
 
         execution.active_ips = (
             db.scalar(
@@ -523,7 +538,8 @@ async def execute_scan(db: Session, execution_id: str, settings: Settings | None
         )
         db.commit()
     except Exception as exc:
-        logger.exception("Falha na execucao %s", execution.id)
+        sanitized_msg = _sanitize_error_message(exc)
+        logger.error("Falha na execucao %s: %s", execution_id, sanitized_msg)
         db.rollback()
         execution_post = db.scalar(select(ScanExecution).where(ScanExecution.id == execution_id))
         if execution_post is not None:
@@ -534,14 +550,14 @@ async def execute_scan(db: Session, execution_id: str, settings: Settings | None
                 )
             )
             if running_engine:
-                _finish_engine(db, running_engine, status="failed", error=str(exc))
+                _finish_engine(db, running_engine, status="failed", error=sanitized_msg)
 
-            if hosts and partial_errors:
+            if hosts:
                 execution_post.status = "partially_completed"
             else:
                 execution_post.status = "failed"
 
-            execution_post.error_summary = str(exc)[:4000]
+            execution_post.error_summary = sanitized_msg[:4000]
             execution_post.finished_at = utcnow()
             audit(
                 db,
@@ -549,7 +565,7 @@ async def execute_scan(db: Session, execution_id: str, settings: Settings | None
                 "scan_execution",
                 execution_post.requested_by,
                 resource_id=execution_post.id,
-                details={"status": execution_post.status, "error": str(exc)[:2000]},
+                details={"status": execution_post.status, "error": sanitized_msg[:2000]},
             )
             db.commit()
     finally:
