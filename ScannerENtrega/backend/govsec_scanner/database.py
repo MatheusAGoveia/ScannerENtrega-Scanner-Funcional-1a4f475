@@ -1,3 +1,4 @@
+import logging
 import re
 from collections.abc import Generator
 
@@ -5,6 +6,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from govsec_scanner.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 class Base(DeclarativeBase):
@@ -38,6 +41,23 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_database() -> None:
-    from govsec_scanner import models  # noqa: F401
+    from pathlib import Path
 
-    Base.metadata.create_all(bind=engine)
+    from alembic.config import Config
+
+    from alembic import command
+
+    logger.info("Inicializando conexao do banco de dados: %s", sanitize_db_url(settings.database_url))
+
+    backend_dir = Path(__file__).resolve().parent.parent
+    alembic_cfg_path = backend_dir / "alembic.ini"
+
+    if alembic_cfg_path.exists():
+        cfg = Config(str(alembic_cfg_path))
+        cfg.set_main_option("script_location", str(backend_dir / "alembic"))
+        cfg.set_main_option("sqlalchemy.url", settings.database_url)
+        command.upgrade(cfg, "head")
+    else:
+        from govsec_scanner import models  # noqa: F401
+
+        Base.metadata.create_all(bind=engine)

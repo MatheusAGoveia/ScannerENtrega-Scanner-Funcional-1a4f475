@@ -105,11 +105,23 @@ def ready(db: Session = Depends(get_db)) -> dict[str, object]:
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Banco de dados indisponivel.") from exc
 
+    try:
+        db.execute(select(ScannerProfile.id).limit(1)).scalars().all()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Migrations nao aplicadas no banco de dados.") from exc
+
     nmap_ok = engine_version(settings.nmap_binary) is not None
     nuclei_ok = not settings.nuclei_enabled or (
         engine_version(settings.nuclei_binary) is not None
         and settings.nuclei_templates_dir.exists()
     )
+
+    if not nmap_ok or not nuclei_ok:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Motores obrigatorios indisponiveis (nmap={nmap_ok}, nuclei={nuclei_ok}).",
+        )
+
     return {"status": "ready", "database": "ok", "nmap": nmap_ok, "nuclei": nuclei_ok}
 
 

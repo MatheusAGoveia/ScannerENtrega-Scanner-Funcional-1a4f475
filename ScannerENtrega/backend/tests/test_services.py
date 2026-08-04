@@ -113,3 +113,23 @@ def test_worker_pipeline_persists_real_engine_results(tmp_path: Path, monkeypatc
         assert len(db.scalars(select(EngineRun)).all()) == 3
 
     engine.dispose()
+
+
+def test_sanitize_db_url_redacts_password() -> None:
+    from govsec_scanner.database import sanitize_db_url
+
+    raw_url = "postgresql+psycopg://govsec_user:secret_password_123@postgres_host:5432/govsec_db"
+    sanitized = sanitize_db_url(raw_url)
+    assert "secret_password_123" not in sanitized
+    assert sanitized == "postgresql+psycopg://govsec_user:[redacted]@postgres_host:5432/govsec_db"
+
+
+def test_production_environment_rejects_sqlite() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="DATABASE_URL com SQLite nao e permitida"):
+        Settings(
+            environment="production",
+            database_url="sqlite:///./scanner.db",
+            api_key="test-api-key-with-at-least-24-chars",
+        )

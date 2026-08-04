@@ -2,30 +2,30 @@ name: govsec-scanner
 
 x-backend-environment: &backend-environment
   SCANNER_ENVIRONMENT: ${SCANNER_ENVIRONMENT:-production}
-  DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-govsec_scanner}:${POSTGRES_PASSWORD:-dev-local-password-123456}@postgres:5432/${POSTGRES_DB:-govsec_scanner}}
-  SCANNER_DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-govsec_scanner}:${POSTGRES_PASSWORD:-dev-local-password-123456}@postgres:5432/${POSTGRES_DB:-govsec_scanner}}
-  SCANNER_API_KEY: ${SCANNER_API_KEY:-dev-local-scanner-api-key-with-32-chars-long}
+  DATABASE_URL: ${DATABASE_URL:?defina DATABASE_URL}
+  SCANNER_DATABASE_URL: ${DATABASE_URL:?defina DATABASE_URL}
+  SCANNER_API_KEY: ${SCANNER_API_KEY:?defina SCANNER_API_KEY}
   SCANNER_ALLOW_PUBLIC_TARGETS: ${SCANNER_ALLOW_PUBLIC_TARGETS:-false}
   SCANNER_MAX_ADDRESSES_PER_RANGE: ${SCANNER_MAX_ADDRESSES_PER_RANGE:-4096}
   SCANNER_NUCLEI_TEMPLATES_DIR: /opt/nuclei-templates
-  SESSION_SECRET: ${SESSION_SECRET:-troque-este-segredo-de-sessao-com-pelo-menos-32-caracteres}
-  SCANNER_AUTH_USER: ${SCANNER_AUTH_USER:-admin-govsec}
-  SCANNER_AUTH_PASS: ${SCANNER_AUTH_PASS:-troque-esta-senha-de-usuario-admin}
+  SESSION_SECRET: ${SESSION_SECRET:?defina SESSION_SECRET}
+  SCANNER_AUTH_USER: ${SCANNER_AUTH_USER:?defina SCANNER_AUTH_USER}
+  SCANNER_AUTH_PASS: ${SCANNER_AUTH_PASS:?defina SCANNER_AUTH_PASS}
 
 services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-govsec_scanner}
-      POSTGRES_USER: ${POSTGRES_USER:-govsec_scanner}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev-local-password-123456}
+      POSTGRES_DB: ${POSTGRES_DB:?defina POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:?defina POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-govsec_scanner} -d $${POSTGRES_DB:-govsec_scanner}"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -33,7 +33,7 @@ services:
 
   migrations:
     build: ./backend
-    command: ["python", "-c", "from govsec_scanner.database import init_database; init_database(); print('Migrations executadas com sucesso!')"]
+    command: ["python", "-c", "from govsec_scanner.database import init_database; init_database(); print('Migrations versionadas alembic executadas com sucesso!')"]
     environment: *backend-environment
     depends_on:
       postgres:

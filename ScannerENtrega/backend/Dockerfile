@@ -10,7 +10,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends nmap libcap2-bin ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && setcap cap_net_raw,cap_net_admin,cap_net_bind_service+eip /usr/bin/nmap \
     && useradd --create-home --uid 10001 scanner
 
 COPY --from=nuclei /usr/local/bin/nuclei /usr/local/bin/nuclei
@@ -19,7 +18,8 @@ RUN mkdir -p /opt/nuclei-templates \
     && chown -R scanner:scanner /opt/nuclei-templates /home/scanner
 
 WORKDIR /app
-COPY pyproject.toml ./
+COPY pyproject.toml alembic.ini ./
+COPY alembic ./alembic
 COPY govsec_scanner ./govsec_scanner
 RUN pip install .
 

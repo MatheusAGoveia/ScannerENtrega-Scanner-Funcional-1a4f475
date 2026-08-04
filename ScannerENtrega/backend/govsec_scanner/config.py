@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import AliasChoices, Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -42,6 +42,19 @@ class Settings(BaseSettings):
         if len(secret) < 24:
             raise ValueError("SCANNER_API_KEY deve possuir no minimo 24 caracteres")
         return value
+
+    @field_validator("database_url")
+    @classmethod
+    def validate_database_url(cls, value: str) -> str:
+        if not value or value.strip() == "":
+            raise ValueError("DATABASE_URL nao pode ser vazia")
+        return value
+
+    @model_validator(mode="after")
+    def validate_production_database(self) -> "Settings":
+        if self.production and self.database_url.startswith("sqlite"):
+            raise ValueError("DATABASE_URL com SQLite nao e permitida em ambiente de producao.")
+        return self
 
     @property
     def production(self) -> bool:
