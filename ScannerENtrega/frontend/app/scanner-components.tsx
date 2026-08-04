@@ -114,7 +114,7 @@ function RangeManager({ ranges, onClose, onChanged }: { ranges: AuthorizedRange[
           owner: form.get("owner"),
           description: form.get("description") || null,
           authorization_reference: form.get("authorization_reference"),
-          allow_public: false,
+          allow_public: true,
         }),
       });
       await onChanged();
