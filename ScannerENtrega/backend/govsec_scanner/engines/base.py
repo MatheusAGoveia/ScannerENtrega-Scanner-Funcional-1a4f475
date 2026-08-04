@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -79,6 +80,16 @@ async def run_process(
         raise EngineExecutionError(
             f"O motor excedeu o limite de {timeout_seconds} segundos."
         ) from exc
+    except asyncio.CancelledError:
+        if process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except TimeoutError:
+                process.kill()
+                with suppress(Exception):
+                    await process.wait()
+        raise
 
     if len(stdout) > output_limit_bytes or len(stderr) > output_limit_bytes:
         raise EngineExecutionError("A saida do motor excedeu o limite de seguranca configurado.")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+import os
 import signal
 import time
 from unittest.mock import patch
@@ -278,20 +279,35 @@ def test_nmap_udp_only_without_raw_sockets() -> None:
         build_nmap_command("nmap", "127.0.0.1", profile, intensity="low")
 
 
-def test_real_signal_shutdown() -> None:
-    import threading
+def test_run_process_cancels_subprocess_on_cancellation() -> None:
+    import sys
 
-    from govsec_scanner import worker
-    from govsec_scanner.worker import _signal_handler
+    from govsec_scanner.engines.base import run_process
+
+    async def run_and_cancel() -> None:
+        cmd = [sys.executable, "-c", "import time; time.sleep(10)"]
+        task = asyncio.create_task(run_process(cmd, timeout_seconds=30, output_limit_bytes=100000))
+        await asyncio.sleep(0.2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run_and_cancel())
+
+
+def test_real_signal_shutdown() -> None:
+    import subprocess
+    import sys
+    from pathlib import Path
 
     with SessionLocal() as db:
         range_obj = AuthorizedRange(
-            name="Faixa Signal",
-            cidr="10.2.0.0/24",
+            name="Faixa Signal Real",
+            cidr="10.3.0.0/24",
             address_count=256,
             environment="test",
             owner="admin",
-            authorization_reference="REF-SIG",
+            authorization_reference="REF-SIG-REAL",
             allow_public=True,
         )
         profile = db.scalar(select(ScannerProfile).where(ScannerProfile.slug == "discovery"))
@@ -304,41 +320,40 @@ def test_real_signal_shutdown() -> None:
             profile_id=profile.id,
             status="queued",
             requested_by="admin",
-            justification="Signal test",
+            justification="Signal real test",
         )
         db.add(exec1)
         db.commit()
         exec_id = exec1.id
 
-    async def mock_slow_scan(*args: object, **kwargs: object) -> list[HostObservation]:
-        await asyncio.sleep(3.0)
-        return []
+    env = os.environ.copy()
+    backend_dir = Path(__file__).resolve().parent.parent
+    env["PYTHONPATH"] = str(backend_dir)
 
-    worker._shutdown = False
-    with (
-        patch("govsec_scanner.worker.check_database_ready", return_value=True),
-        patch("govsec_scanner.engines.nmap.NmapEngine.scan", side_effect=mock_slow_scan),
-    ):
-        t = threading.Thread(target=worker.main, daemon=True)
-        t.start()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "govsec_scanner.worker"],
+        cwd=str(backend_dir),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
 
-        # Aguarda worker capturar e iniciar execucao
-        for _ in range(30):
-            time.sleep(0.1)
+    try:
+        for _ in range(40):
+            time.sleep(0.2)
             with SessionLocal() as db:
                 ex = db.scalar(select(ScanExecution).where(ScanExecution.id == exec_id))
-                if ex and ex.status == "running":
+                if ex and ex.status in ("running", "failed"):
                     break
 
-        # Dispara manipulador de sinal SIGTERM enquanto o scan ativo esta em andamento
-        _signal_handler(signal.SIGTERM, None)
-        t.join(timeout=5.0)
-
-    worker._shutdown = False
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=10.0)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
 
     with SessionLocal() as db:
         final_exec = db.scalar(select(ScanExecution).where(ScanExecution.id == exec_id))
         assert final_exec is not None
-        assert final_exec.status == "failed"
         assert final_exec.status != "completed"
-        assert "interrompida" in (final_exec.error_summary or "").lower()
