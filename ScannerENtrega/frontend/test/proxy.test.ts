@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { NextRequest } from "next/server.js";
 import { POST as loginHandler } from "../app/api/scanner/login/route.ts";
 import { POST as logoutHandler } from "../app/api/scanner/logout/route.ts";
+import { GET as sessionHandler } from "../app/api/scanner/session/route.ts";
 import { proxy } from "../app/api/scanner/[...path]/route.ts";
 import { parseSession, signSession } from "../app/api/scanner/session.ts";
 
@@ -227,4 +228,58 @@ test("Security - Secret keys are never exposed in JSON responses", async () => {
   const text = await res.text();
   assert.ok(!text.includes("test-frontend-secret-key-32-chars"));
   assert.ok(!text.includes("test-session-secret-key-32-chars"));
+});
+
+test("Session Restore Endpoint - GET /api/scanner/session restores valid session or rejects invalid/unauthorized roles", async () => {
+  // 1. Without session cookie -> 401
+  const noSessionReq = createMockRequest("http://localhost:3000/api/scanner/session");
+  const noSessionRes = await sessionHandler(noSessionReq);
+  assert.strictEqual(noSessionRes.status, 401);
+  const noSessionData = await noSessionRes.json();
+  assert.strictEqual(noSessionData.authenticated, false);
+
+  // 2. Valid operator session -> 200 (Restores session state on reload F5)
+  const now = Math.floor(Date.now() / 1000);
+  const validToken = signSession({
+    actor: "operador-restaurado",
+    role: "operator",
+    iat: now,
+    exp: now + 3600,
+  })!;
+  const validReq = createMockRequest("http://localhost:3000/api/scanner/session", {
+    cookies: { scanner_session: validToken },
+  });
+  const validRes = await sessionHandler(validReq);
+  assert.strictEqual(validRes.status, 200);
+  const validData = await validRes.json();
+  assert.strictEqual(validData.authenticated, true);
+  assert.strictEqual(validData.actor, "operador-restaurado");
+
+  // 3. Unauthorized role (e.g. guest) -> 403
+  const unauthRoleToken = signSession({
+    actor: "usuario-convidado",
+    role: "guest",
+    iat: now,
+    exp: now + 3600,
+  })!;
+  const unauthReq = createMockRequest("http://localhost:3000/api/scanner/session", {
+    cookies: { scanner_session: unauthRoleToken },
+  });
+  const unauthRes = await sessionHandler(unauthReq);
+  assert.strictEqual(unauthRes.status, 403);
+  const unauthData = await unauthRes.json();
+  assert.strictEqual(unauthData.authenticated, false);
+
+  // 4. Expired session -> 401
+  const expiredToken = signSession({
+    actor: "operador-expirado",
+    role: "operator",
+    iat: now - 3600,
+    exp: now - 10,
+  })!;
+  const expiredReq = createMockRequest("http://localhost:3000/api/scanner/session", {
+    cookies: { scanner_session: expiredToken },
+  });
+  const expiredRes = await sessionHandler(expiredReq);
+  assert.strictEqual(expiredRes.status, 401);
 });

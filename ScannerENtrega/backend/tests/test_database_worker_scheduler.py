@@ -452,7 +452,8 @@ def test_partial_failure_preserves_valid_results(tmp_path: Path, monkeypatch: ob
     engine.dispose()
 
 
-def test_post_claim_failure_marks_execution_failed(tmp_path: Path, monkeypatch: object) -> None:
+def test_post_claim_real_query_failure_recovers_via_independent_session(tmp_path: Path, monkeypatch: object) -> None:
+    from sqlalchemy.exc import SQLAlchemyError
     db_file = tmp_path / "post_claim_fail_test.db"
     engine, Session = _init_test_db(db_file)
 
@@ -460,16 +461,13 @@ def test_post_claim_failure_marks_execution_failed(tmp_path: Path, monkeypatch: 
         seed_profiles(db)
         profile = db.scalar(select(ScannerProfile).where(ScannerProfile.slug == "availability"))
         assert profile is not None
-
-        # Disabled range (fails scope/authorization validation after claim)
         range_item = AuthorizedRange(
-            name="Faixa Desativada",
+            name="Faixa Post-Claim Fail",
             cidr="10.80.0.0/24",
             address_count=256,
             environment="Teste",
             owner="Dev",
-            authorization_reference="AUT-DISABLED-001",
-            enabled=False,
+            authorization_reference="AUT-FAIL-001",
         )
         db.add(range_item)
         db.flush()
@@ -481,45 +479,119 @@ def test_post_claim_failure_marks_execution_failed(tmp_path: Path, monkeypatch: 
             started_at=utcnow(),
             trigger_type="manual",
             requested_by="tester",
-            justification="Teste de falha no estagio inicial pos-captura.",
+            justification="Teste de falha real na consulta pos-captura.",
         )
         db.add(execution)
         db.commit()
         execution_id = execution.id
 
+        # Simulate a real DB query failure after claim
+        def mock_failing_scalar(*args: object, **kwargs: object) -> object:
+            raise SQLAlchemyError("Conexao interrompida: C:\\secret\\db.sqlite?pass=secret123")
+
+        monkeypatch.setattr(db, "scalar", mock_failing_scalar)
+
         settings = Settings(api_key="test-api-key-with-at-least-24-chars")
         asyncio.run(execute_scan(db, execution_id, settings))
 
-        updated = db.get(ScanExecution, execution_id)
-        assert updated is not None
-        assert updated.status == "failed"
-        assert updated.finished_at is not None
-        assert "nao possui autorizacao ativa" in (updated.error_summary or "")
+        # Restore db.scalar to inspect results with a fresh session
+        monkeypatch.undo()
+        with Session() as verify_db:
+            updated = verify_db.get(ScanExecution, execution_id)
+            assert updated is not None
+            assert updated.status == "failed"
+            assert updated.finished_at is not None
+            # Confirms sensitive path and password were redacted
+            assert "pass=[redacted]" in (updated.error_summary or "")
+            assert "secret123" not in (updated.error_summary or "")
 
     engine.dispose()
 
 
-def test_heartbeat_renewal_and_task_cleanup_during_execution(tmp_path: Path, monkeypatch: object) -> None:
-    db_file = tmp_path / "hb_test.db"
+def test_post_claim_total_db_unavailability_preserves_stale_recovery(tmp_path: Path, monkeypatch: object) -> None:
+    from sqlalchemy.exc import SQLAlchemyError
+    db_file = tmp_path / "total_unavail.db"
     engine, Session = _init_test_db(db_file)
-
-    async def delayed_nmap_mock(*args: object, **kwargs: object) -> list[HostObservation]:
-        await asyncio.sleep(0.1)
-        return []
-
-    monkeypatch.setattr(NmapEngine, "scan", delayed_nmap_mock)
 
     with Session() as db:
         seed_profiles(db)
         profile = db.scalar(select(ScannerProfile).where(ScannerProfile.slug == "availability"))
         assert profile is not None
         range_item = AuthorizedRange(
-            name="Faixa Heartbeat",
+            name="Faixa Unavail",
+            cidr="10.85.0.0/24",
+            address_count=256,
+            environment="Teste",
+            owner="Dev",
+            authorization_reference="AUT-UNAVAIL-001",
+        )
+        db.add(range_item)
+        db.flush()
+
+        stale_hb = utcnow() - timedelta(seconds=600)
+        execution = ScanExecution(
+            range_id=range_item.id,
+            profile_id=profile.id,
+            status="running",
+            started_at=utcnow() - timedelta(seconds=600),
+            heartbeat_at=stale_hb,
+            trigger_type="manual",
+            requested_by="tester",
+            justification="Teste de indisponibilidade total.",
+        )
+        db.add(execution)
+        db.commit()
+        execution_id = execution.id
+
+        def mock_failing_scalar(*args: object, **kwargs: object) -> object:
+            raise SQLAlchemyError("Banco totalmente indisponivel")
+
+        monkeypatch.setattr(db, "scalar", mock_failing_scalar)
+
+        # Force failure in independent fail_db session as well
+        monkeypatch.setattr("govsec_scanner.services.audit", mock_failing_scalar)
+
+        settings = Settings(api_key="test-api-key-with-at-least-24-chars")
+        asyncio.run(execute_scan(db, execution_id, settings))
+
+        # Restore monkeypatch to verify stale recovery works
+        monkeypatch.undo()
+        with Session() as verify_db:
+            recovered_count = recover_stale_executions(verify_db, stale_timeout_seconds=300.0)
+            assert recovered_count == 1
+            updated = verify_db.get(ScanExecution, execution_id)
+            assert updated is not None
+            assert updated.status == "failed"
+
+    engine.dispose()
+
+
+def test_periodic_heartbeat_loop_and_cleanup_without_engine_run(tmp_path: Path, monkeypatch: object) -> None:
+    db_file = tmp_path / "periodic_hb_test.db"
+    engine, Session = _init_test_db(db_file)
+
+    async def delayed_nmap_mock(*args: object, **kwargs: object) -> list[HostObservation]:
+        await asyncio.sleep(0.08)
+        return []
+
+    monkeypatch.setattr(NmapEngine, "scan", delayed_nmap_mock)
+
+    hb_ticks: list[int] = []
+
+    def on_heartbeat_tick() -> None:
+        hb_ticks.append(len(hb_ticks) + 1)
+
+    with Session() as db:
+        seed_profiles(db)
+        profile = db.scalar(select(ScannerProfile).where(ScannerProfile.slug == "availability"))
+        assert profile is not None
+        range_item = AuthorizedRange(
+            name="Faixa Heartbeat Periodic",
             cidr="10.90.0.0/24",
             address_count=256,
             environment="Teste",
             owner="Dev",
-            authorization_reference="AUT-HB-001",
+            authorization_reference="AUT-HB-002",
         )
         db.add(range_item)
         db.flush()
@@ -533,25 +605,36 @@ def test_heartbeat_renewal_and_task_cleanup_during_execution(tmp_path: Path, mon
             heartbeat_at=initial_hb,
             trigger_type="manual",
             requested_by="tester",
-            justification="Teste de renovacao automatica de heartbeat.",
+            justification="Teste de loop de heartbeat verdadeiramente periodico.",
         )
         db.add(execution)
         db.commit()
         execution_id = execution.id
 
-        # Use valid stale timeout (ge=10.0)
         settings = Settings(api_key="test-api-key-with-at-least-24-chars", worker_stale_timeout_seconds=10.0)
 
-        # Execute scan with short 50ms heartbeat interval to exercise periodic loop
-        asyncio.run(execute_scan(db, execution_id, settings, hb_interval_override=0.05))
+        # Run execute_scan with short 20ms interval and callback instrumentation
+        asyncio.run(
+            execute_scan(
+                db,
+                execution_id,
+                settings,
+                hb_interval_override=0.02,
+                on_heartbeat=on_heartbeat_tick,
+            )
+        )
 
+        # 1. Confirm the periodic loop ticked at least once
+        assert len(hb_ticks) >= 1
+
+        # 2. Confirm heartbeat_at in DB was updated by the background loop
         updated = db.get(ScanExecution, execution_id)
         assert updated is not None
         assert updated.status == "completed"
         assert updated.heartbeat_at is not None
         assert updated.heartbeat_at > initial_hb
 
-        # Confirm active worker recovery DOES NOT recover this execution
+        # 3. Confirm active worker recovery DOES NOT recover this execution
         recovered = recover_stale_executions(db, stale_timeout_seconds=300.0)
         assert recovered == 0
 

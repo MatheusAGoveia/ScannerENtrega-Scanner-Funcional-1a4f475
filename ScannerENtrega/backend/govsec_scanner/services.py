@@ -310,8 +310,14 @@ def _sanitize_error_message(exc: Exception) -> str:
 
 
 async def _periodic_heartbeat(
-    execution_id: str, interval_seconds: float, stop_event: asyncio.Event
+    execution_id: str,
+    interval_seconds: float,
+    stop_event: asyncio.Event,
+    bind_engine: Any = None,
+    on_heartbeat: Any = None,
 ) -> None:
+    from sqlalchemy.orm import Session as SQLAlchemySession
+
     from govsec_scanner.database import SessionLocal
 
     while not stop_event.is_set():
@@ -319,12 +325,23 @@ async def _periodic_heartbeat(
             await asyncio.sleep(interval_seconds)
             if stop_event.is_set():
                 break
-            with SessionLocal() as hb_db:
-                touch_execution_heartbeat(hb_db, execution_id)
+            if bind_engine is not None:
+                with SQLAlchemySession(bind=bind_engine) as hb_db:
+                    touch_execution_heartbeat(hb_db, execution_id)
+            else:
+                with SessionLocal() as hb_db:
+                    touch_execution_heartbeat(hb_db, execution_id)
+
+            if on_heartbeat is not None and callable(on_heartbeat):
+                on_heartbeat()
         except asyncio.CancelledError:
             break
         except Exception as exc:
-            logger.warning("Falha ao atualizar heartbeat para execucao %s: %s", execution_id, _sanitize_error_message(exc))
+            logger.warning(
+                "Falha ao atualizar heartbeat para execucao %s: %s",
+                execution_id,
+                _sanitize_error_message(exc),
+            )
 
 
 async def execute_scan(
@@ -332,11 +349,21 @@ async def execute_scan(
     execution_id: str,
     settings: Settings | None = None,
     hb_interval_override: float | None = None,
+    on_heartbeat: Any = None,
 ) -> None:
     settings = settings or get_settings()
     hb_interval = hb_interval_override or max(0.5, settings.worker_stale_timeout_seconds / 4.0)
     stop_event = asyncio.Event()
-    heartbeat_task = asyncio.create_task(_periodic_heartbeat(execution_id, hb_interval, stop_event))
+    bind_engine = db.get_bind()
+    heartbeat_task = asyncio.create_task(
+        _periodic_heartbeat(
+            execution_id,
+            hb_interval,
+            stop_event,
+            bind_engine=bind_engine,
+            on_heartbeat=on_heartbeat,
+        )
+    )
 
     partial_errors: list[str] = []
     hosts: list[HostObservation] = []

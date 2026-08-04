@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ScannerOverview as FunctionalScannerOverview,
   ScanSchedules as FunctionalScanSchedules,
@@ -210,15 +210,23 @@ function Empty({ title, copy }: { title: string; copy: string }) {
   return <div className="empty"><span>◇</span><h2>{title}</h2><p>{copy}</p></div>;
 }
 
-function LoginForm({ onLoginSuccess }: { onLoginSuccess: (actor: string) => void }) {
+function LoginForm({
+  onLoginSuccess,
+  initialError,
+}: {
+  onLoginSuccess: (actor: string) => void;
+  initialError?: string | null;
+}) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [errorState, setErrorState] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  const error = errorState ?? initialError ?? null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError(null);
+    setErrorState(null);
     setLoading(true);
     try {
       const res = await fetch("/api/scanner/login", {
@@ -231,12 +239,12 @@ function LoginForm({ onLoginSuccess }: { onLoginSuccess: (actor: string) => void
       });
       const data = await res.json();
       if (!res.ok) {
-        setError(data.detail || "Credenciais invalidas ou configuracao ausente.");
+        setErrorState(data.detail || "Credenciais invalidas ou configuracao ausente.");
       } else {
         onLoginSuccess(data.actor || username);
       }
     } catch {
-      setError("Erro ao conectar ao servidor de autenticacao.");
+      setErrorState("Erro ao conectar ao servidor de autenticacao.");
     } finally {
       setLoading(false);
     }
@@ -291,9 +299,45 @@ function LoginForm({ onLoginSuccess }: { onLoginSuccess: (actor: string) => void
 
 export default function Home() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [userActor, setUserActor] = useState<string>("Rafael Souza");
+  const [userActor, setUserActor] = useState<string>("Operador");
+  const [loadingSession, setLoadingSession] = useState(true);
+  const [authError, setAuthError] = useState<string | null>(null);
   const [page, setPage] = useState<Page>("scanners");
   const [mobileNav, setMobileNav] = useState(false);
+
+  useEffect(() => {
+    let isMounted = true;
+    const validateServerSession = async () => {
+      try {
+        const res = await fetch("/api/scanner/session");
+        const data = await res.json();
+        if (isMounted) {
+          if (res.ok && data.authenticated) {
+            setIsAuthenticated(true);
+            setUserActor(data.actor || "Operador");
+            setAuthError(null);
+          } else {
+            setIsAuthenticated(false);
+            if (res.status === 403) {
+              setAuthError(data.detail || "Acesso negado para o perfil do usuario.");
+            }
+          }
+        }
+      } catch {
+        if (isMounted) {
+          setIsAuthenticated(false);
+        }
+      } finally {
+        if (isMounted) {
+          setLoadingSession(false);
+        }
+      }
+    };
+    validateServerSession();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   const title = useMemo(() => nav.flatMap(group => group.items).find(item => item[0] === page)?.[2] ?? "Detalhe do incidente", [page]);
   const go = (next: Page) => { setPage(next); setMobileNav(false); window.scrollTo({ top: 0, behavior: "smooth" }); };
@@ -313,8 +357,12 @@ export default function Home() {
     }
   };
 
+  if (loadingSession) {
+    return <div data-testid="session-loading" style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>Validando sessao...</div>;
+  }
+
   if (!isAuthenticated) {
-    return <LoginForm onLoginSuccess={(actor) => { setUserActor(actor); setIsAuthenticated(true); }} />;
+    return <LoginForm initialError={authError} onLoginSuccess={(actor) => { setUserActor(actor); setIsAuthenticated(true); setAuthError(null); }} />;
   }
 
   return <div className={`app ${page === "privileged" ? "restricted-mode" : ""}`} data-testid="scanner-app">

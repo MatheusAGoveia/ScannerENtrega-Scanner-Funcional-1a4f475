@@ -173,28 +173,97 @@ def test_banner_engine_collects_a_real_local_http_banner() -> None:
     assert banner is not None and "Server: govsec-test" in banner
 
 
-def test_tls_verification_is_strict_by_default() -> None:
-    import ssl
-    ctx = ssl.create_default_context()
-    assert ctx.check_hostname is True
-    assert ctx.verify_mode == ssl.CERT_REQUIRED
+def test_banner_engine_tls_integration_and_fallback(monkeypatch: object) -> None:
+    import ssl as ssl_module
+    created_contexts: list[ssl_module.SSLContext] = []
+    orig_create_default_context = ssl_module.create_default_context
 
+    def intercept_create_default_context(*args: object, **kwargs: object) -> ssl_module.SSLContext:
+        ctx = orig_create_default_context(*args, **kwargs)
+        created_contexts.append(ctx)
+        return ctx
 
-def test_tls_fallback_only_on_cert_error(monkeypatch: object) -> None:
-    open_conn_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(ssl_module, "create_default_context", intercept_create_default_context)
 
-    async def mock_open_connection(host: str, port: int, ssl: object = None, server_hostname: object = None) -> None:
-        open_conn_calls.append({"host": host, "port": port, "ssl": ssl, "server_hostname": server_hostname})
-        # Simulate a generic network/OS error (e.g. ConnectionRefusedError)
-        raise OSError("Connection refused")
+    connection_attempts: list[dict[str, object]] = []
 
-    monkeypatch.setattr(asyncio, "open_connection", mock_open_connection)
+    # Scenario 1: SSLCertVerificationError triggers exactly 1 fallback attempt with unverified context
+    async def mock_open_conn_cert_error(host: str, port: int, ssl: object = None, server_hostname: object = None) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        connection_attempts.append({"host": host, "port": port, "ssl": ssl, "server_hostname": server_hostname})
+        if len(connection_attempts) == 1:
+            raise ssl_module.SSLCertVerificationError("Certificate verification failed")
+
+        class MockSSLObject:
+            def version(self) -> str:
+                return "TLSv1.3"
+            def cipher(self) -> tuple[str, str, int]:
+                return ("TLS_AES_256_GCM_SHA384", "TLSv1.3", 256)
+
+        class MockWriter:
+            def get_extra_info(self, name: str) -> object:
+                if name == "ssl_object":
+                    return MockSSLObject()
+                return None
+            def write(self, data: bytes) -> None:
+                pass
+            async def drain(self) -> None:
+                pass
+            def close(self) -> None:
+                pass
+            async def wait_closed(self) -> None:
+                pass
+
+        class MockReader:
+            async def read(self, n: int) -> bytes:
+                return b"HTTP/1.1 200 OK\r\nServer: tls-fallback-test\r\n\r\n"
+
+        return MockReader(), MockWriter()  # type: ignore
+
+    monkeypatch.setattr(asyncio, "open_connection", mock_open_conn_cert_error)
 
     service = ServiceObservation(protocol="tcp", port=443, service_name="https")
-    host = HostObservation(ip_address="127.0.0.1", services=[service])
+    host = HostObservation(ip_address="10.0.0.1", services=[service])
 
     count = asyncio.run(BannerEngine().enrich([host], timeout_seconds=2, max_parallelism=1))
-    assert count == 0
-    # Exactly ONE connection attempt made; NO unverified fallback attempted for generic OSError
-    assert len(open_conn_calls) == 1
-    assert open_conn_calls[0]["server_hostname"] == "127.0.0.1"
+    assert count == 1
+    # 1. Verify two contexts created: primary strict context and unverified fallback context
+    assert len(created_contexts) == 2
+    primary_ctx = created_contexts[0]
+    fallback_ctx = created_contexts[1]
+
+    # 2. Confirm primary context properties
+    assert primary_ctx.check_hostname is True
+    assert primary_ctx.verify_mode == ssl_module.CERT_REQUIRED
+
+    # 3. Confirm fallback context properties
+    assert fallback_ctx.check_hostname is False
+    assert fallback_ctx.verify_mode == ssl_module.CERT_NONE
+
+    # 4. Confirm connection attempts: exactly 2 attempts
+    assert len(connection_attempts) == 2
+    assert connection_attempts[0]["ssl"] is primary_ctx
+    assert connection_attempts[0]["server_hostname"] == "10.0.0.1"
+    assert connection_attempts[1]["ssl"] is fallback_ctx
+    assert connection_attempts[1]["server_hostname"] is None
+
+    # 5. Confirm result identified fallback connection as unverified
+    assert service.tls_details is not None
+    assert '"verified":false' in service.tls_details or '"verified": false' in service.tls_details
+
+    # Scenario 2: Generic OSError / Timeout / ConnectionRefused makes ONLY the strict attempt
+    connection_attempts.clear()
+    created_contexts.clear()
+
+    async def mock_open_conn_generic_error(host: str, port: int, ssl: object = None, server_hostname: object = None) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        connection_attempts.append({"host": host, "port": port, "ssl": ssl, "server_hostname": server_hostname})
+        raise ConnectionRefusedError("Connection refused")
+
+    monkeypatch.setattr(asyncio, "open_connection", mock_open_conn_generic_error)
+    service2 = ServiceObservation(protocol="tcp", port=443, service_name="https")
+    host2 = HostObservation(ip_address="10.0.0.2", services=[service2])
+
+    count2 = asyncio.run(BannerEngine().enrich([host2], timeout_seconds=2, max_parallelism=1))
+    assert count2 == 0
+    # Exactly ONE connection attempt made; NO unverified fallback attempted
+    assert len(connection_attempts) == 1
+    assert connection_attempts[0]["ssl"] is created_contexts[0]
