@@ -30,6 +30,7 @@ from govsec_scanner.models import (
     EngineRun,
     ScanExecution,
     ScannerProfile,
+    ServiceHeartbeat,
     VulnerabilityFinding,
     utcnow,
 )
@@ -303,9 +304,26 @@ def _persist_findings(
 
 def _sanitize_error_message(exc: Exception) -> str:
     msg = str(exc)
+    msg = re.sub(
+        r"postgresql(?:\+[\w]+)?://[^:\s]+:[^@\s]+@",
+        "postgresql://[redacted]:[redacted]@",
+        msg,
+        flags=re.IGNORECASE,
+    )
     msg = re.sub(r"(?:[a-zA-Z]:\\|[/\\])[\w\-./\\]+", "[path-redacted]", msg)
     msg = re.sub(r"Traceback.*", "[traceback-redacted]", msg, flags=re.DOTALL)
-    msg = re.sub(r"(key|secret|token|pass|password|auth|authorization)=\S+", r"\1=[redacted]", msg, flags=re.IGNORECASE)
+    msg = re.sub(
+        r"(key|secret|token|pass|password|auth|authorization)\s*[:=]\s*\S+",
+        r"\1=[redacted]",
+        msg,
+        flags=re.IGNORECASE,
+    )
+    msg = re.sub(
+        r"(key|secret|token|pass|password|auth|authorization)\s+\S+",
+        r"\1 [redacted]",
+        msg,
+        flags=re.IGNORECASE,
+    )
     return msg[:2000].strip() or "Falha no processamento da execucao."
 
 
@@ -648,6 +666,38 @@ def touch_execution_heartbeat(db: Session, execution_id: str) -> None:
         .values(heartbeat_at=now)
     )
     db.commit()
+
+
+def update_service_heartbeat(
+    db: Session,
+    service_name: str,
+    instance_id: str,
+    status: str = "healthy",
+    details: dict[str, Any] | None = None,
+) -> None:
+    now = utcnow()
+    details_str = json.dumps(details or {}, ensure_ascii=False, separators=(",", ":"))
+    heartbeat = db.scalar(
+        select(ServiceHeartbeat).where(
+            ServiceHeartbeat.service_name == service_name,
+            ServiceHeartbeat.instance_id == instance_id,
+        )
+    )
+    if heartbeat is None:
+        heartbeat = ServiceHeartbeat(
+            service_name=service_name,
+            instance_id=instance_id,
+            status=status,
+            last_heartbeat_at=now,
+            details_json=details_str,
+        )
+        db.add(heartbeat)
+    else:
+        heartbeat.status = status
+        heartbeat.last_heartbeat_at = now
+        heartbeat.details_json = details_str
+    db.commit()
+
 
 
 def recover_stale_executions(db: Session, stale_timeout_seconds: float = 300.0) -> int:

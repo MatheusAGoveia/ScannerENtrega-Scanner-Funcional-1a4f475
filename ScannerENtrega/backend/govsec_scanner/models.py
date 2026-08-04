@@ -93,12 +93,16 @@ class ScanSchedule(Base):
 
 class ScanExecution(Base):
     __tablename__ = "scan_executions"
-    __table_args__ = (Index("ix_scan_execution_queue", "status", "queued_at"),)
+    __table_args__ = (
+        Index("ix_scan_execution_queue", "status", "queued_at"),
+        Index("ix_scan_executions_scheduled_run_at", "schedule_id", "scheduled_run_at", unique=True),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     schedule_id: Mapped[str | None] = mapped_column(
         ForeignKey("scan_schedules.id", ondelete="SET NULL")
     )
+    scheduled_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     range_id: Mapped[str] = mapped_column(
         ForeignKey("authorized_ranges.id", ondelete="RESTRICT"), nullable=False
     )
@@ -254,4 +258,24 @@ class AuditLog(Base):
     details_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, index=True
+    )
+
+
+class ServiceHeartbeat(Base):
+    __tablename__ = "service_heartbeats"
+    __table_args__ = (
+        UniqueConstraint("service_name", "instance_id", name="uq_service_instance"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    service_name: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
+    instance_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="healthy")
+    last_heartbeat_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    details_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

@@ -58,6 +58,40 @@ services:
       - "127.0.0.1:8000:8000"
     networks: [scanner_internal]
 
+  worker:
+    build: ./backend
+    restart: unless-stopped
+    command: ["python", "-m", "govsec_scanner.worker"]
+    environment: *backend-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-m", "govsec_scanner.healthcheck", "--service", "worker"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [scanner_internal]
+
+  scheduler:
+    build: ./backend
+    restart: unless-stopped
+    command: ["python", "-m", "govsec_scanner.scheduler"]
+    environment: *backend-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-m", "govsec_scanner.healthcheck", "--service", "scheduler"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [scanner_internal]
+
 networks:
   scanner_internal:
     driver: bridge
