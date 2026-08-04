@@ -57,34 +57,76 @@ class BannerEngine:
         service: ServiceObservation,
     ) -> tuple[str | None, str | None]:
         ssl_context: ssl.SSLContext | None = None
-        if service.port in TLS_PORTS or (service.service_name or "").lower() in {
+        tls_details: str | None = None
+        is_tls = service.port in TLS_PORTS or (service.service_name or "").lower() in {
             "https",
             "ssl/http",
-        }:
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
+        }
 
-        reader, writer = await asyncio.open_connection(
-            ip_address,
-            service.port,
-            ssl=ssl_context,
-            server_hostname=None,
-        )
-        tls_details: str | None = None
-        ssl_object = writer.get_extra_info("ssl_object")
-        if ssl_object is not None:
-            tls_details = json.dumps(
-                {
-                    "version": ssl_object.version(),
-                    "cipher": ssl_object.cipher()[0] if ssl_object.cipher() else None,
-                },
-                separators=(",", ":"),
+        reader: asyncio.StreamReader | None = None
+        writer: asyncio.StreamWriter | None = None
+
+        if is_tls:
+            ssl_context = ssl.create_default_context()
+            hostname = ip_address
+            try:
+                reader, writer = await asyncio.open_connection(
+                    ip_address,
+                    service.port,
+                    ssl=ssl_context,
+                    server_hostname=hostname,
+                )
+                ssl_object = writer.get_extra_info("ssl_object")
+                if ssl_object is not None:
+                    tls_details = json.dumps(
+                        {
+                            "version": ssl_object.version(),
+                            "cipher": ssl_object.cipher()[0] if ssl_object.cipher() else None,
+                            "verified": True,
+                        },
+                        separators=(",", ":"),
+                    )
+            except (ssl.SSLError, ssl.CertificateError, OSError):
+                # Fallback: Second unverified connection attempted ONLY after strict validation fails
+                unverified_context = ssl.create_default_context()
+                unverified_context.check_hostname = False
+                unverified_context.verify_mode = ssl.CERT_NONE
+                try:
+                    reader, writer = await asyncio.wait_for(
+                        asyncio.open_connection(
+                            ip_address,
+                            service.port,
+                            ssl=unverified_context,
+                            server_hostname=None,
+                        ),
+                        timeout=2.0,
+                    )
+                    if writer is not None:
+                        ssl_object = writer.get_extra_info("ssl_object")
+                        if ssl_object is not None:
+                            tls_details = json.dumps(
+                                {
+                                    "version": ssl_object.version(),
+                                    "cipher": ssl_object.cipher()[0] if ssl_object.cipher() else None,
+                                    "verified": False,
+                                },
+                                separators=(",", ":"),
+                            )
+                except (TimeoutError, OSError, ssl.SSLError):
+                    return None, None
+        else:
+            reader, writer = await asyncio.open_connection(
+                ip_address,
+                service.port,
+                ssl=None,
             )
+
+        if reader is None or writer is None:
+            return None, None
 
         if (
             service.port in HTTP_PORTS
-            or ssl_context is not None
+            or is_tls
             or "http" in (service.service_name or "")
         ):
             writer.write(

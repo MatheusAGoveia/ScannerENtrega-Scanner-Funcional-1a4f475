@@ -1,7 +1,7 @@
 # Memória Persistente — GovSec Shield / ScannerENtrega
 
 - **Data de Início:** 2026-08-04T13:13:09-03:00 (UTC-3) / 2026-08-04 16:13:09 UTC
-- **Última Atualização:** 2026-08-04T14:07:30-03:00 (UTC-3)
+- **Última Atualização:** 2026-08-04T15:00:30-03:00 (UTC-3)
 - **Autor/Agente:** IA Assistente (Arquiteto Principal GovSec Shield)
 
 ## 1. Estado Atual & O que já foi implementado
@@ -12,49 +12,50 @@
 - [x] Validação do Banco de Dados, Schema, Fila, Worker e Scheduler (Prompt 4).
 - [x] Revisão Corretiva da Recuperação do Worker (Prompt 4 - Correção).
 - [x] Validação e Correção dos Motores do Scanner (Prompt 5).
-- [x] Validação e Correção da Integração Frontend Next.js <-> FastAPI (Prompt 6):
-  - Confirmação de que todas as 18 rotas do frontend apontam para o proxy `/api/scanner/[...path]` com repasse de segredos apenas do servidor para a API.
-  - Inclusão do campo `heartbeat_at?: string | null;` na interface TypeScript `ScanExecution` em `frontend/app/scanner-api.ts`.
-  - Criação da suíte de testes de integração em [backend/tests/test_api_integration.py](file:///c:/Users/matheus.damiao/Downloads/ScannerENtrega-Scanner-Funcional-1a4f475/ScannerENtrega/backend/tests/test_api_integration.py) cobrindo autenticação, erros HTTP 401/409/422, enfileiramento sem varredura real e cancelamento.
-  - Teste operacional com inicialização concorrente de servidores locais (FastAPI na porta 8000 e Next.js), validando chamadas via proxy sem dados fictícios.
-  - Execução bem-sucedida das ferramentas de verificação estática e compilação (`compileall`, `ruff`, `mypy`, `pytest` 27/27 aprovados com 78% de cobertura, `npm run lint`, `npm run typecheck` e `npm run build` concluídos sem erros).
+- [x] Validação e Correção da Integração Frontend Next.js <-> FastAPI (Prompt 6).
+- [x] Correção Pontual de Segurança e Robustez (Prompt 6 - Correção Pontual a partir do commit 2d5b0d0):
+  - Autenticação de servidor e assinaturas HMAC de sessão (`scanner_session`) no proxy Next.js, ignorando cabeçalhos de ator e chaves do cliente.
+  - Proteção contra CSRF/origens inválidas nas requisições de mutação (POST, PATCH, DELETE) retornando HTTP 403.
+  - Renovação periódica de `heartbeat_at` durante a execução (`_periodic_heartbeat`) com intervalo inferior a 1/3 do timeout, sessão isolada do banco e encerramento em `finally`.
+  - Tratamento seguro pós-captura (`try...except`) garantindo marcação como `failed` com `finished_at` e `error_summary` em caso de erro inicial sem deixar tarefas presas em `running`.
+  - Restauração de TLS estrito (`ssl.create_default_context()`) na inspeção de banners, com fallback não verificado somente após falha do fluxo principal.
+  - Exclusão e ignoramento de `frontend/tsconfig.tsbuildinfo` no `.gitignore`.
+  - Adição de testes de proxy em TypeScript/Node (`npm run test` com 5/5 testes aprovados) e 29/29 testes aprovados no Pytest (78% de cobertura).
 
 ## 2. O que está pendente (Próximos Passos)
 - [ ] Validação final dos contêineres Docker e orquestração do ambiente completo.
 - [ ] Aguardar instruções do operador para os próximos prompts.
 
 ## 3. Decisões Arquiteturais Tomadas
-- Manter o isolamento completo de segredos de API (`SCANNER_API_KEY` e `BACKEND_URL`) no backend Next.js via proxy `/api/scanner/[...path]`.
-- Garantir que enfileiramentos manuais pelo frontend para testes não disparem o worker sem solicitação expressa.
+- O ator da requisição (`X-Scanner-Actor`) é extraído exclusivamente da sessão assinada no servidor Next.js, sendo impossível de ser forjado pelo cliente.
+- A renovação do heartbeat do worker roda em uma sessão SQLAlchemy independente para evitar interferências com transações ativas da execução principal.
+- Validação TLS nativa permanece ativada no fluxo principal de inspeção de serviços.
 
 ## 4. Problemas Enfrentados e Soluções Adotadas
-- **Alocação de Porta durante Execução Integrada**: A porta 3000 estava previamente alocada por outra aplicação no host. Solução: Next.js selecionou automaticamente a porta 3002 e a API na porta 8000 respondeu normalmente via proxy.
+- **Risco de Falsificação de Ator no Proxy**: Cabeçalhos enviados pelo navegador eram repassados. Solução: Sanitização completa no proxy e injeção do ator extraído da sessão.
+- **Acúmulo do arquivo `tsconfig.tsbuildinfo` no Git**: O arquivo reaparecia a cada build. Solução: Removido do índice (`git rm --cached`) e adicionada regra `*.tsbuildinfo` no `.gitignore`.
 
 ## 5. Lista de Arquivos Criados / Modificados
 - `memoria.md` (Atualizado)
-- `ScannerENtrega/.env` (Criado)
-- `ScannerENtrega/backend/govsec_scanner/api.py` (Modificado)
-- `ScannerENtrega/backend/govsec_scanner/config.py` (Modificado)
-- `ScannerENtrega/backend/govsec_scanner/models.py` (Modificado)
-- `ScannerENtrega/backend/govsec_scanner/schemas.py` (Modificado)
-- `ScannerENtrega/backend/govsec_scanner/services.py` (Modificado)
-- `ScannerENtrega/backend/govsec_scanner/worker.py` (Modificado)
-- `ScannerENtrega/backend/govsec_scanner/engines/nmap.py` (Modificado)
-- `ScannerENtrega/backend/govsec_scanner/engines/nuclei.py` (Modificado)
-- `ScannerENtrega/backend/tests/test_engines.py` (Modificado)
-- `ScannerENtrega/backend/tests/test_database_worker_scheduler.py` (Criado)
-- `ScannerENtrega/backend/tests/test_api_integration.py` (Criado - Testes de integração backend-frontend)
-- `ScannerENtrega/frontend/package.json` (Modificado)
-- `ScannerENtrega/frontend/app/scanner-api.ts` (Modificado - Tipagem do `heartbeat_at`)
-- `ScannerENtrega/frontend/.env.local` (Criado)
+- `ScannerENtrega/.gitignore` (Modificado - adicionada regra `*.tsbuildinfo`)
+- `ScannerENtrega/backend/govsec_scanner/engines/banner.py` (Modificado - TLS estrito e fallback)
+- `ScannerENtrega/backend/govsec_scanner/services.py` (Modificado - Heartbeat assíncrono e try...except pós-captura)
+- `ScannerENtrega/backend/tests/test_database_worker_scheduler.py` (Modificado - Teste de falhas pós-captura)
+- `ScannerENtrega/backend/tests/test_engines.py` (Modificado - Teste de TLS estrito)
+- `ScannerENtrega/frontend/package.json` (Modificado - Adição do script "test" e `"type": "module"`)
+- `ScannerENtrega/frontend/tsconfig.json` (Modificado - `allowImportingTsExtensions`)
+- `ScannerENtrega/frontend/app/api/scanner/session.ts` (Criado - Sessão assinada e verificação CSRF)
+- `ScannerENtrega/frontend/app/api/scanner/[...path]/route.ts` (Modificado - Proxy seguro)
+- `ScannerENtrega/frontend/test/proxy.test.ts` (Criado - Suíte de testes do proxy Next.js)
 
 ## 6. Resultados de Testes
 - Backend:
   - `compileall`: 100% dos arquivos compilados sem erros.
   - `ruff check .`: 0 erros (All checks passed).
   - `mypy govsec_scanner`: 0 erros (Success: no issues found in 18 source files).
-  - `pytest tests -v --cov=govsec_scanner`: 27 de 27 testes aprovados (100%), 0 falhas, 0 ignorados, 78% de cobertura.
+  - `pytest tests -v --cov=govsec_scanner`: 29 de 29 testes aprovados (100%), 0 falhas, 0 ignorados, 78% de cobertura.
 - Frontend:
   - `npm run lint`: 0 erros.
   - `npm run typecheck`: 0 erros.
-  - `npm run build`: Compilação de produção concluída com sucesso em 2.6s.
+  - `npm run test`: 5 de 5 testes do proxy aprovados (100%).
+  - `npm run build`: Compilação de produção concluída com sucesso em 2.9s.

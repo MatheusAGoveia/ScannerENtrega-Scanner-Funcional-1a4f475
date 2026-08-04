@@ -171,3 +171,10 @@ def test_banner_engine_collects_a_real_local_http_banner() -> None:
     enriched, banner = asyncio.run(scenario())
     assert enriched == 1
     assert banner is not None and "Server: govsec-test" in banner
+
+
+def test_tls_verification_is_strict_by_default() -> None:
+    import ssl
+    ctx = ssl.create_default_context()
+    assert ctx.check_hostname is True
+    assert ctx.verify_mode == ssl.CERT_REQUIRED

@@ -450,3 +450,50 @@ def test_partial_failure_preserves_valid_results(tmp_path: Path, monkeypatch: ob
         assert service.port == 80
 
     engine.dispose()
+
+
+def test_post_claim_failure_marks_execution_failed(tmp_path: Path, monkeypatch: object) -> None:
+    db_file = tmp_path / "post_claim_fail_test.db"
+    engine, Session = _init_test_db(db_file)
+
+    with Session() as db:
+        seed_profiles(db)
+        profile = db.scalar(select(ScannerProfile).where(ScannerProfile.slug == "availability"))
+        assert profile is not None
+
+        # Disabled range (fails scope/authorization validation after claim)
+        range_item = AuthorizedRange(
+            name="Faixa Desativada",
+            cidr="10.80.0.0/24",
+            address_count=256,
+            environment="Teste",
+            owner="Dev",
+            authorization_reference="AUT-DISABLED-001",
+            enabled=False,
+        )
+        db.add(range_item)
+        db.flush()
+
+        execution = ScanExecution(
+            range_id=range_item.id,
+            profile_id=profile.id,
+            status="running",
+            started_at=utcnow(),
+            trigger_type="manual",
+            requested_by="tester",
+            justification="Teste de falha no estagio inicial pos-captura.",
+        )
+        db.add(execution)
+        db.commit()
+        execution_id = execution.id
+
+        settings = Settings(api_key="test-api-key-with-at-least-24-chars")
+        asyncio.run(execute_scan(db, execution_id, settings))
+
+        updated = db.get(ScanExecution, execution_id)
+        assert updated is not None
+        assert updated.status == "failed"
+        assert updated.finished_at is not None
+        assert "nao possui autorizacao ativa" in (updated.error_summary or "")
+
+    engine.dispose()

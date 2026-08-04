@@ -6,6 +6,7 @@ import json
 import logging
 import shutil
 import subprocess
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -299,6 +300,24 @@ def _persist_findings(
     return count
 
 
+async def _periodic_heartbeat(
+    execution_id: str, interval_seconds: float, stop_event: asyncio.Event
+) -> None:
+    from govsec_scanner.database import SessionLocal
+
+    while not stop_event.is_set():
+        try:
+            await asyncio.sleep(interval_seconds)
+            if stop_event.is_set():
+                break
+            with SessionLocal() as hb_db:
+                touch_execution_heartbeat(hb_db, execution_id)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.warning("Falha ao atualizar heartbeat para execucao %s: %s", execution_id, exc)
+
+
 async def execute_scan(db: Session, execution_id: str, settings: Settings | None = None) -> None:
     settings = settings or get_settings()
     execution = db.scalar(
@@ -312,53 +331,59 @@ async def execute_scan(db: Session, execution_id: str, settings: Settings | None
     if execution is None or execution.status != "running":
         return
 
-    scope = validate_scope(
-        execution.authorized_range.cidr,
-        max_addresses=settings.max_addresses_per_range,
-        allow_public=execution.authorized_range.allow_public,
-        global_public_enabled=settings.allow_public_targets,
-    )
-    if (
-        not execution.authorized_range.enabled
-        or not execution.authorized_range.authorization_reference
-    ):
-        raise EngineExecutionError("A faixa nao possui autorizacao ativa.")
-
-    maximum_seconds = 7200
-    if execution.schedule_id:
-        from govsec_scanner.models import ScanSchedule
-
-        schedule = db.get(ScanSchedule, execution.schedule_id)
-        if schedule:
-            maximum_seconds = schedule.max_duration_minutes * 60
-            intensity = schedule.intensity
-            sync_zabbix = schedule.sync_zabbix
-        else:
-            intensity = "low"
-            sync_zabbix = False
-    else:
-        intensity = "low"
-        sync_zabbix = False
+    hb_interval = max(0.5, settings.worker_stale_timeout_seconds / 4.0)
+    stop_event = asyncio.Event()
+    heartbeat_task = asyncio.create_task(_periodic_heartbeat(execution_id, hb_interval, stop_event))
 
     partial_errors: list[str] = []
     hosts: list[HostObservation] = []
-    audit(
-        db,
-        "scan.execution.started",
-        "scan_execution",
-        execution.requested_by,
-        resource_id=execution.id,
-        details={
-            "target": scope.normalized,
-            "authorization_reference": execution.authorized_range.authorization_reference,
-            "profile": execution.profile.slug,
-            "nmap_version": engine_version(settings.nmap_binary),
-            "nuclei_version": engine_version(settings.nuclei_binary)
-            if execution.profile.vulnerability_detection_enabled
-            else None,
-        },
-    )
+
     try:
+        scope = validate_scope(
+            execution.authorized_range.cidr,
+            max_addresses=settings.max_addresses_per_range,
+            allow_public=execution.authorized_range.allow_public,
+            global_public_enabled=settings.allow_public_targets,
+        )
+        if (
+            not execution.authorized_range.enabled
+            or not execution.authorized_range.authorization_reference
+        ):
+            raise EngineExecutionError("A faixa nao possui autorizacao ativa.")
+
+        maximum_seconds = 7200
+        if execution.schedule_id:
+            from govsec_scanner.models import ScanSchedule
+
+            schedule = db.get(ScanSchedule, execution.schedule_id)
+            if schedule:
+                maximum_seconds = schedule.max_duration_minutes * 60
+                intensity = schedule.intensity
+                sync_zabbix = schedule.sync_zabbix
+            else:
+                intensity = "low"
+                sync_zabbix = False
+        else:
+            intensity = "low"
+            sync_zabbix = False
+
+        audit(
+            db,
+            "scan.execution.started",
+            "scan_execution",
+            execution.requested_by,
+            resource_id=execution.id,
+            details={
+                "target": scope.normalized,
+                "authorization_reference": execution.authorized_range.authorization_reference,
+                "profile": execution.profile.slug,
+                "nmap_version": engine_version(settings.nmap_binary),
+                "nuclei_version": engine_version(settings.nuclei_binary)
+                if execution.profile.vulnerability_detection_enabled
+                else None,
+            },
+        )
+
         nmap_run = _engine_run(db, execution, "nmap")
         hosts = await NmapEngine(settings).scan(
             scope.normalized,
@@ -499,26 +524,39 @@ async def execute_scan(db: Session, execution_id: str, settings: Settings | None
         db.commit()
     except Exception as exc:
         logger.exception("Falha na execucao %s", execution.id)
-        running_engine = db.scalar(
-            select(EngineRun).where(
-                EngineRun.execution_id == execution.id,
-                EngineRun.status == "running",
+        db.rollback()
+        execution_post = db.scalar(select(ScanExecution).where(ScanExecution.id == execution_id))
+        if execution_post is not None:
+            running_engine = db.scalar(
+                select(EngineRun).where(
+                    EngineRun.execution_id == execution_post.id,
+                    EngineRun.status == "running",
+                )
             )
-        )
-        if running_engine:
-            _finish_engine(db, running_engine, status="failed", error=str(exc))
-        execution.status = "failed"
-        execution.error_summary = str(exc)[:4000]
-        execution.finished_at = utcnow()
-        audit(
-            db,
-            "scan.execution.failed",
-            "scan_execution",
-            execution.requested_by,
-            resource_id=execution.id,
-            details={"status": "failed", "error": str(exc)[:2000]},
-        )
-        db.commit()
+            if running_engine:
+                _finish_engine(db, running_engine, status="failed", error=str(exc))
+
+            if hosts and partial_errors:
+                execution_post.status = "partially_completed"
+            else:
+                execution_post.status = "failed"
+
+            execution_post.error_summary = str(exc)[:4000]
+            execution_post.finished_at = utcnow()
+            audit(
+                db,
+                "scan.execution.failed",
+                "scan_execution",
+                execution_post.requested_by,
+                resource_id=execution_post.id,
+                details={"status": execution_post.status, "error": str(exc)[:2000]},
+            )
+            db.commit()
+    finally:
+        stop_event.set()
+        heartbeat_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await heartbeat_task
 
 
 def claim_next_execution(db: Session) -> str | None:
