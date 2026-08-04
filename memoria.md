@@ -1,7 +1,7 @@
 # Memória Persistente — GovSec Shield / ScannerENtrega
 
 - **Data de Início:** 2026-08-04T13:13:09-03:00 (UTC-3) / 2026-08-04 16:13:09 UTC
-- **Última Atualização:** 2026-08-04T17:02:00-03:00 (UTC-3)
+- **Última Atualização:** 2026-08-04T17:18:00-03:00 (UTC-3)
 - **Autor/Agente:** IA Assistente (Arquiteto Principal GovSec Shield)
 
 ## 1. Estado Atual & O que já foi implementado
@@ -16,37 +16,28 @@
 - [x] Correção Pontual de Segurança e Robustez (Prompt 6 - Correção Pontual a partir do commit 2d5b0d0).
 - [x] Finalização de Segurança e Robustez do Scanner (branch `fix/scanner-security-final`).
 - [x] Fase 1 da Integração Docker + PostgreSQL 16 + Migrations Alembic (branch `feat/scanner-docker-postgres`):
-  - **Docker Compose com Variáveis Obrigatórias**: Removidas credenciais padrão do `docker-compose.yml`. Utilizada a sintaxe `${VAR:?defina VAR}` para forçar o Compose a falhar se usuário, senha, banco, chave de API ou segredo de sessão não forem informados.
-  - **Fim do Fallback Silencioso para SQLite**: No ambiente de produção (`SCANNER_ENVIRONMENT=production` ou `staging`), `DATABASE_URL` é estritamente obrigatória e rejeita conexões SQLite via `model_validator` no `Settings`.
-  - **Prontidão Rígida em `/health/ready`**: Retorna `HTTP 503` caso o PostgreSQL esteja inacessível, as migrations não estejam aplicadas ou motores obrigatórios (Nmap e Nuclei) não estejam disponíveis.
-  - **Migrations Versionadas com Alembic**: Implementada estrutura Alembic (`backend/alembic/`) com a migration inicial `001_initial_schema.py`. A execução é 100% idempotente e o contêiner `migrations` executa `alembic upgrade head`. O registro da versão na tabela `alembic_version` foi verificado diretamente no PostgreSQL.
-  - **Sanitização de URLs de Banco de Dados**: A função `sanitize_db_url()` mascara senhas em logs do backend (`logger.info`) e possui teste unitário dedicado em `test_services.py`.
-  - **Testes Aprovados**: 33/33 testes no Pytest aprovados (0 falhas).
-  - Commit final: `76df7c4` na branch `feat/scanner-docker-postgres`.
+  - **Alembic Exclusivo no Serviço `migrations`**: Removida completamente qualquer execução de `alembic upgrade` ou `init_database()` na inicialização da API, Worker e Scheduler. Somente o contêiner `migrations` executa `python -m alembic upgrade head`.
+  - **Remoção Total do Fallback `Base.metadata.create_all()`**: Eliminado qualquer fallback automatizado de criação de tabelas. Sem Alembic ou migrations aplicadas, a aplicação falha de forma explícita.
+  - **Validação Rígida de Prontidão em `/health/ready`**: O endpoint valida conectividade com o PostgreSQL, existência da tabela `alembic_version`, versão aplicada igual ao head esperado (`001_initial_schema`) e motores Nmap/Nuclei disponíveis, retornando `503` caso qualquer validação falhe.
+  - **Uso Estrito do SQLite**: Desativada qualquer instanciação padrão implícita do SQLite quando `DATABASE_URL` não for informada (lançando `ValueError`). O SQLite só é aceito mediante configuração explícita de ambiente.
+  - **Suíte de Testes Aprovada**: Criados testes em `test_migration_and_health.py` cobrindo todas as regras descritas. 40/40 testes unitários aprovados no Pytest.
+  - **Sanitização de Logs e Git Cleanliness**: `git diff --check` sem erros de espaços em branco; ausência de credenciais em logs e volume `postgres_data` preservado.
 
 ## 2. O que está pendente (Próximos Passos)
 - [ ] Fase 2: Integração e orquestração dos contêineres de Worker e Scheduler.
 - [ ] Fase 3: Integração do Frontend no Compose e validação end-to-end do ambiente completo.
 
 ## 3. Decisões Arquiteturais Tomadas
-- O Alembic é a ferramenta oficial de migrations versionadas do projeto.
-- O contêiner de migrations executa a aplicação das migrations antes de autorizar o boot da API Backend.
-- No contêiner Docker da API, o binário do Nmap roda sem `setcap` restritivo para permitir checagem de versão pelo usuário não-root `scanner`.
+- O serviço `migrations` no Compose é o único responsável pela execução de DDL no banco de dados via `alembic upgrade head`.
+- O Backend, Worker e Scheduler utilizam `check_database_ready()` apenas para consultar a versão aplicada em `alembic_version` sem alterar o schema.
 
-## 4. Problemas Enfrentados e Soluções Adotadas
-- **Alembic env.py usando URL padrão do alembic.ini**: Corrigido em `env.py` para forçar o uso da `settings.database_url`.
-- **Inclusão do Alembic no Dockerfile**: Adicionado `COPY alembic.ini ./` e `COPY alembic ./alembic` no `Dockerfile` do backend.
-
-## 5. Lista de Arquivos Criados / Modificados
+## 4. Lista de Arquivos Criados / Modificados
 - `memoria.md` (Atualizado)
 - `ScannerENtrega/docker-compose.yml` (Modificado)
-- `ScannerENtrega/backend/Dockerfile` (Modificado)
-- `ScannerENtrega/backend/alembic.ini` (Criado)
-- `ScannerENtrega/backend/alembic/env.py` (Criado)
-- `ScannerENtrega/backend/alembic/script.py.mako` (Criado)
-- `ScannerENtrega/backend/alembic/versions/001_initial_schema.py` (Criado)
 - `ScannerENtrega/backend/govsec_scanner/api.py` (Modificado)
 - `ScannerENtrega/backend/govsec_scanner/config.py` (Modificado)
 - `ScannerENtrega/backend/govsec_scanner/database.py` (Modificado)
-- `ScannerENtrega/backend/pyproject.toml` (Modificado)
-- `ScannerENtrega/backend/tests/test_services.py` (Modificado)
+- `ScannerENtrega/backend/govsec_scanner/scheduler.py` (Modificado)
+- `ScannerENtrega/backend/govsec_scanner/worker.py` (Modificado)
+- `ScannerENtrega/backend/tests/conftest.py` (Modificado)
+- `ScannerENtrega/backend/tests/test_migration_and_health.py` (Criado)
