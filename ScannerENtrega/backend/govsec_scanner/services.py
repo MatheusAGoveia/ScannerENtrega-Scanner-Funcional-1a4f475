@@ -363,8 +363,9 @@ async def _periodic_heartbeat(
             logger.warning(
                 "Falha ao atualizar heartbeat para execucao %s: %s",
                 execution_id,
-                exc,
+                _sanitize_error_message(exc),
             )
+
 
 
 async def execute_scan(
@@ -593,6 +594,45 @@ async def execute_scan(
             },
         )
         db.commit()
+    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+        interrupted_msg = "Execucao interrompida por encerramento gracioso do worker (SIGTERM/SIGINT)."
+        logger.warning("Execucao %s interrompida por sinal: %s", execution_id, interrupted_msg)
+        with suppress(Exception):
+            db.rollback()
+
+        try:
+            bind_engine = db.get_bind()
+            with Session(bind=bind_engine) as fail_db:
+                execution_post = fail_db.scalar(select(ScanExecution).where(ScanExecution.id == execution_id))
+                if execution_post is not None:
+                    running_engine = fail_db.scalar(
+                        select(EngineRun).where(
+                            EngineRun.execution_id == execution_post.id,
+                            EngineRun.status == "running",
+                        )
+                    )
+                    if running_engine:
+                        _finish_engine(fail_db, running_engine, status="failed", error=interrupted_msg)
+
+                    execution_post.status = "failed"
+                    execution_post.error_summary = interrupted_msg
+                    execution_post.finished_at = utcnow()
+                    audit(
+                        fail_db,
+                        "scan.execution.interrupted",
+                        "scan_execution",
+                        execution_post.requested_by,
+                        resource_id=execution_post.id,
+                        details={"status": "failed", "error": interrupted_msg},
+                    )
+                    fail_db.commit()
+        except Exception as db_exc:
+            logger.warning(
+                "Nao foi possivel persistir estado de interrupcao para execucao %s: %s",
+                execution_id,
+                _sanitize_error_message(db_exc),
+            )
+        raise
     except Exception as exc:
         sanitized_msg = _sanitize_error_message(exc)
         logger.error("Falha na execucao %s: %s", execution_id, sanitized_msg)

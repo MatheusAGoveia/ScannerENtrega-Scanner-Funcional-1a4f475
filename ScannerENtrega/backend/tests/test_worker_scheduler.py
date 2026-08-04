@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import logging
 import signal
+import time
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
 
 from govsec_scanner.database import Base, SessionLocal, engine
-from govsec_scanner.engines.base import HostObservation
+from govsec_scanner.engines.base import EngineExecutionError, HostObservation
+from govsec_scanner.engines.nmap import build_nmap_command
 from govsec_scanner.healthcheck import check_health
 from govsec_scanner.models import (
     AuthorizedRange,
@@ -180,10 +183,7 @@ def test_healthcheck_validates_instance_id() -> None:
             db, "worker", "worker-inst-A", status="healthy", details={"test": True}
         )
 
-    # Healthcheck para instancia exata existente deve passar
     assert check_health("worker", max_staleness_seconds=10, instance_id="worker-inst-A") is True
-
-    # Healthcheck para outra instancia deve falhar
     assert check_health("worker", max_staleness_seconds=10, instance_id="worker-inst-B") is False
 
 
@@ -215,17 +215,6 @@ def test_worker_service_heartbeat_during_long_scan() -> None:
         db.commit()
         execution_id = exec1.id
 
-    async def mock_scan_work() -> None:
-        with SessionLocal() as db:
-            asyncio.run(
-                execute_scan(
-                    db,
-                    execution_id,
-                    hb_interval_override=0.2,
-                    instance_id="worker-long-test",
-                )
-            )
-
     async def mock_async_scan(*args: object, **kwargs: object) -> list[HostObservation]:
         await asyncio.sleep(0.5)
         return []
@@ -254,15 +243,45 @@ def test_worker_service_heartbeat_during_long_scan() -> None:
         assert hb.status == "healthy"
 
 
-def test_failure_logged_without_secrets() -> None:
+def test_failure_logged_without_secrets(caplog: pytest.LogCaptureFixture) -> None:
     msg_with_secret = "Error connecting to db postgresql://user:super_secret_password_123@localhost:5432/db with key test-api-key-12345"
     sanitized = _sanitize_error_message(Exception(msg_with_secret))
     assert "super_secret_password_123" not in sanitized
     assert "test-api-key-12345" not in sanitized
-    assert "[REDACTED]" in sanitized or "postgresql://" not in sanitized
+
+    with caplog.at_level(logging.WARNING):
+        log = logging.getLogger("govsec_scanner.worker")
+        try:
+            raise ValueError(msg_with_secret)
+        except ValueError as exc:
+            log.warning("Falha formatada: %s", _sanitize_error_message(exc))
+
+    assert "super_secret_password_123" not in caplog.text
+    assert "test-api-key-12345" not in caplog.text
+
+
+def test_nmap_udp_only_without_raw_sockets() -> None:
+    profile = ScannerProfile(
+        slug="udp_only",
+        name="Perfil UDP",
+        description="Apenas UDP",
+        discovery_enabled=True,
+        service_detection_enabled=False,
+        vulnerability_detection_enabled=False,
+        tcp_ports="",
+        udp_ports="53,123",
+    )
+    with (
+        patch("govsec_scanner.engines.nmap._can_use_raw_sockets", return_value=False),
+        pytest.raises(EngineExecutionError, match="Varredura UDP via Nmap requer privilegios de raw sockets"),
+    ):
+        build_nmap_command("nmap", "127.0.0.1", profile, intensity="low")
 
 
 def test_real_signal_shutdown() -> None:
+    import threading
+
+    from govsec_scanner import worker
     from govsec_scanner.worker import _signal_handler
 
     with SessionLocal() as db:
@@ -289,12 +308,37 @@ def test_real_signal_shutdown() -> None:
         )
         db.add(exec1)
         db.commit()
+        exec_id = exec1.id
 
-    # Dispara manipulador de sinal real SIGTERM
-    _signal_handler(signal.SIGTERM, None)
+    async def mock_slow_scan(*args: object, **kwargs: object) -> list[HostObservation]:
+        await asyncio.sleep(3.0)
+        return []
 
-    from govsec_scanner import worker
-    assert worker._shutdown is True
-
-    # Restaura _shutdown para nao afetar outros testes
     worker._shutdown = False
+    with (
+        patch("govsec_scanner.worker.check_database_ready", return_value=True),
+        patch("govsec_scanner.engines.nmap.NmapEngine.scan", side_effect=mock_slow_scan),
+    ):
+        t = threading.Thread(target=worker.main, daemon=True)
+        t.start()
+
+        # Aguarda worker capturar e iniciar execucao
+        for _ in range(30):
+            time.sleep(0.1)
+            with SessionLocal() as db:
+                ex = db.scalar(select(ScanExecution).where(ScanExecution.id == exec_id))
+                if ex and ex.status == "running":
+                    break
+
+        # Dispara manipulador de sinal SIGTERM enquanto o scan ativo esta em andamento
+        _signal_handler(signal.SIGTERM, None)
+        t.join(timeout=5.0)
+
+    worker._shutdown = False
+
+    with SessionLocal() as db:
+        final_exec = db.scalar(select(ScanExecution).where(ScanExecution.id == exec_id))
+        assert final_exec is not None
+        assert final_exec.status == "failed"
+        assert final_exec.status != "completed"
+        assert "interrompida" in (final_exec.error_summary or "").lower()

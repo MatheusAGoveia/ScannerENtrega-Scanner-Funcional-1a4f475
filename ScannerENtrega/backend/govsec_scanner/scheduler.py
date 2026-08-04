@@ -13,7 +13,13 @@ from govsec_scanner.config import get_settings
 from govsec_scanner.database import SessionLocal, check_database_ready
 from govsec_scanner.healthcheck import get_default_instance_id
 from govsec_scanner.models import ScanExecution, ScanSchedule, utcnow
-from govsec_scanner.services import audit, next_cron_run, seed_profiles, update_service_heartbeat
+from govsec_scanner.services import (
+    _sanitize_error_message,
+    audit,
+    next_cron_run,
+    seed_profiles,
+    update_service_heartbeat,
+)
 
 logger = logging.getLogger("govsec_scanner.scheduler")
 _shutdown = False
@@ -108,8 +114,11 @@ def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
-    signal.signal(signal.SIGINT, _signal_handler)
-    signal.signal(signal.SIGTERM, _signal_handler)
+    try:
+        signal.signal(signal.SIGINT, _signal_handler)
+        signal.signal(signal.SIGTERM, _signal_handler)
+    except ValueError:
+        pass
 
     settings = get_settings()
     instance_id = get_default_instance_id("scheduler")
@@ -142,14 +151,14 @@ def main() -> None:
                     )
                 last_heartbeat = now
             except Exception as exc:
-                logger.warning("Falha ao atualizar heartbeat do scheduler: %s", exc)
+                logger.warning("Falha ao atualizar heartbeat do scheduler: %s", _sanitize_error_message(exc))
 
         try:
             queued = enqueue_due_schedules()
             if queued:
                 logger.info("Agendamentos enfileirados: %d", queued)
         except Exception as exc:
-            logger.error("Erro ao enfileirar agendamentos: %s", exc)
+            logger.error("Erro ao enfileirar agendamentos: %s", _sanitize_error_message(exc))
 
         # Espera fracionada para responder rapidamente ao sinal de shutdown
         sleep_chunk = 0.5
@@ -168,8 +177,8 @@ def main() -> None:
                 status="stopped",
                 details={"hostname": socket.gethostname()},
             )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Falha ao registrar parada do scheduler: %s", _sanitize_error_message(exc))
 
 
 if __name__ == "__main__":

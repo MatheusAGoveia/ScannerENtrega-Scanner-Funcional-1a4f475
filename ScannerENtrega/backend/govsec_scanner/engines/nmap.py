@@ -55,6 +55,11 @@ def build_nmap_command(
         raise ValueError("O perfil nao possui portas configuradas.")
 
     can_raw = _can_use_raw_sockets()
+    if udp_ports and not can_raw and not tcp_ports:
+        raise EngineExecutionError(
+            "Varredura UDP via Nmap requer privilegios de raw sockets (root ou CAP_NET_RAW)."
+        )
+
     command = [
         binary,
         "-n",
@@ -86,6 +91,12 @@ def build_nmap_command(
         port_specs.append("T:" + ",".join(str(port) for port in tcp_ports))
     if udp_ports and can_raw:
         port_specs.append("U:" + ",".join(str(port) for port in udp_ports))
+
+    if not port_specs:
+        raise EngineExecutionError(
+            "Nenhuma porta valida ou disponivel para varredura sem privilegios de raw sockets."
+        )
+
     command.extend(["-p", ",".join(port_specs), "--", target])
     return command
 
