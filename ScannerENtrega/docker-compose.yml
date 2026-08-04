@@ -1,0 +1,93 @@
+name: govsec-scanner
+
+x-backend-environment: &backend-environment
+  SCANNER_ENVIRONMENT: ${SCANNER_ENVIRONMENT:-production}
+  SCANNER_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?defina POSTGRES_USER}:${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?defina POSTGRES_DB}
+  SCANNER_API_KEY: ${SCANNER_API_KEY:?defina SCANNER_API_KEY}
+  SCANNER_ALLOW_PUBLIC_TARGETS: ${SCANNER_ALLOW_PUBLIC_TARGETS:-false}
+  SCANNER_MAX_ADDRESSES_PER_RANGE: ${SCANNER_MAX_ADDRESSES_PER_RANGE:-4096}
+  SCANNER_NUCLEI_TEMPLATES_DIR: /opt/nuclei-templates
+  SCANNER_ZABBIX_URL: ${SCANNER_ZABBIX_URL:-}
+  SCANNER_ZABBIX_TOKEN: ${SCANNER_ZABBIX_TOKEN:-}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?defina POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:?defina POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [scanner_internal]
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    environment: *backend-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+    ports:
+      - "127.0.0.1:8000:8000"
+    networks: [scanner_internal]
+
+  worker:
+    build: ./backend
+    restart: unless-stopped
+    command: ["python", "-m", "govsec_scanner.worker"]
+    environment: *backend-environment
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [scanner_internal]
+
+  scheduler:
+    build: ./backend
+    restart: unless-stopped
+    command: ["python", "-m", "govsec_scanner.scheduler"]
+    environment: *backend-environment
+    depends_on:
+      api:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    networks: [scanner_internal]
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://api:8000
+      SCANNER_API_KEY: ${SCANNER_API_KEY:?defina SCANNER_API_KEY}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    security_opt:
+      - no-new-privileges:true
+    networks: [scanner_internal]
+
+networks:
+  scanner_internal:
+    driver: bridge
+
+volumes:
+  postgres_data:
