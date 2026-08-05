@@ -146,7 +146,54 @@ class ServiceOut(OrmModel):
     version: str | None
     banner: str | None
     tls_details: str | None
+    normalized_service_name: str | None = None
+    normalized_product: str | None = None
+    normalized_version: str | None = None
+    cpe: str | None = None
+    category: str | None = None
+    risk_score: int | None = None
+    risk_level: str | None = None
+    last_observation_id: str | None = None
+    first_seen_at: datetime | None = None
     last_seen_at: datetime
+    reasons: list[str] = Field(default_factory=list)
+
+
+class ServiceDetailOut(ServiceOut):
+    asset_id: str
+    ip_address: str | None = None
+
+
+class ServiceObservationRead(OrmModel):
+    id: str
+    service_id: str
+    execution_id: str
+    observed_at: datetime
+    state: str
+    raw_service_name: str | None = None
+    normalized_service_name: str | None = None
+    raw_product: str | None = None
+    normalized_product: str | None = None
+    raw_version: str | None = None
+    normalized_version: str | None = None
+    cpe: str | None = None
+    category: str | None = None
+    confidence: str | None = None
+
+
+class ServiceRiskAssessmentRead(OrmModel):
+    id: str
+    service_id: str
+    execution_id: str
+    score: int
+    level: str
+    reasons: list[str] = Field(default_factory=list)
+    evaluated_at: datetime
+
+
+class ServiceHistoryOut(BaseModel):
+    observations: list[ServiceObservationRead] = Field(default_factory=list)
+    risk_assessments: list[ServiceRiskAssessmentRead] = Field(default_factory=list)
 
 
 class AssetOut(OrmModel):

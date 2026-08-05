@@ -31,9 +31,15 @@ from govsec_scanner.models import (
     ScanExecution,
     ScannerProfile,
     ServiceHeartbeat,
+    ServiceObservation,
+    ServiceRiskAssessment,
     VulnerabilityFinding,
     utcnow,
 )
+from govsec_scanner.intelligence.normalization import normalize_service_observation
+from govsec_scanner.intelligence.catalog import default_catalog
+from govsec_scanner.intelligence.context import evaluate_context
+from govsec_scanner.intelligence.risk import evaluate_service_risk
 from govsec_scanner.scope import validate_scope
 from govsec_scanner.zabbix import ZabbixClient, ZabbixError
 
@@ -178,6 +184,25 @@ def _cancel_requested(db: Session, execution_id: str) -> bool:
     return bool(value)
 
 
+def _parse_scanned_ports(profile: ScannerProfile | None) -> set[tuple[str, int]]:
+    scanned: set[tuple[str, int]] = set()
+    if profile is None:
+        return scanned
+    tcp_str = profile.tcp_ports if profile.tcp_ports is not None else DEFAULT_TCP_PORTS
+    udp_str = profile.udp_ports if profile.udp_ports is not None else DEFAULT_UDP_PORTS
+    if tcp_str:
+        for p in tcp_str.split(","):
+            p = p.strip()
+            if p.isdigit():
+                scanned.add(("tcp", int(p)))
+    if udp_str:
+        for p in udp_str.split(","):
+            p = p.strip()
+            if p.isdigit():
+                scanned.add(("udp", int(p)))
+    return scanned
+
+
 def _persist_hosts(
     db: Session,
     execution: ScanExecution,
@@ -193,6 +218,7 @@ def _persist_hosts(
             .where(DiscoveredAsset.range_id == execution.range_id)
         ).all()
     }
+    scanned_ports = _parse_scanned_ports(execution.profile if hasattr(execution, "profile") else None)
     service_count = 0
     for host in hosts:
         asset = existing_assets.get(host.ip_address)
@@ -222,22 +248,118 @@ def _persist_hosts(
                 )
                 db.add(service)
                 existing_services[key] = service
+            # Phase 4: Intelligence Pipeline
+            norm_data = normalize_service_observation(
+                service_name=observed.service_name,
+                product=observed.product,
+                version=observed.version,
+                port=observed.port,
+                protocol=observed.protocol,
+                cpe_raw=None,
+            )
+            catalog_item = default_catalog.resolve(
+                service_name=norm_data.service_name_normalized,
+                product=norm_data.product_normalized,
+                port=observed.port,
+            )
+            category = catalog_item.category if catalog_item else "general"
+            context_data = evaluate_context(
+                ip_address=host.ip_address,
+                category=category,
+                is_remote_access=catalog_item.is_remote_access if catalog_item else False,
+                is_encrypted=catalog_item.is_encrypted if catalog_item else False,
+            )
+            risk_res = evaluate_service_risk(
+                service_name=norm_data.service_name_normalized,
+                catalog_item=catalog_item,
+                context=context_data,
+            )
+
             service.state = observed.state
             service.service_name = observed.service_name
             service.product = observed.product
             service.version = observed.version
             service.banner = observed.banner
             service.tls_details = observed.tls_details
+            service.normalized_service_name = norm_data.service_name_normalized
+            service.normalized_product = norm_data.product_normalized
+            service.normalized_version = norm_data.version_normalized
+            service.cpe = norm_data.cpe
+            service.category = category
+            service.risk_score = risk_res.score
+            service.risk_level = risk_res.level
             service.last_seen_at = now
             service.last_execution_id = execution.id
+
+            db.flush()
+
+            # Idempotent ServiceObservation
+            obs = db.scalar(
+                select(ServiceObservation).where(
+                    ServiceObservation.execution_id == execution.id,
+                    ServiceObservation.service_id == service.id,
+                )
+            )
+            if obs is None:
+                obs = ServiceObservation(
+                    service_id=service.id,
+                    execution_id=execution.id,
+                    observed_at=now,
+                    state=observed.state,
+                    raw_service_name=observed.service_name,
+                    normalized_service_name=norm_data.service_name_normalized,
+                    raw_product=observed.product,
+                    normalized_product=norm_data.product_normalized,
+                    raw_version=observed.version,
+                    normalized_version=norm_data.version_normalized,
+                    cpe=norm_data.cpe,
+                    category=category,
+                    confidence="high",
+                )
+                db.add(obs)
+                db.flush()
+            else:
+                obs.state = observed.state
+                obs.raw_service_name = observed.service_name
+                obs.normalized_service_name = norm_data.service_name_normalized
+                obs.raw_product = observed.product
+                obs.normalized_product = norm_data.product_normalized
+                obs.raw_version = observed.version
+                obs.normalized_version = norm_data.version_normalized
+                obs.cpe = norm_data.cpe
+                obs.category = category
+
+            service.last_observation_id = obs.id
+
+            # Idempotent ServiceRiskAssessment
+            risk_ass = db.scalar(
+                select(ServiceRiskAssessment).where(
+                    ServiceRiskAssessment.execution_id == execution.id,
+                    ServiceRiskAssessment.service_id == service.id,
+                )
+            )
+            reasons_json = json.dumps(risk_res.reasons, ensure_ascii=False)
+            if risk_ass is None:
+                risk_ass = ServiceRiskAssessment(
+                    service_id=service.id,
+                    execution_id=execution.id,
+                    score=risk_res.score,
+                    level=risk_res.level,
+                    reasons_json=reasons_json,
+                    evaluated_at=now,
+                )
+                db.add(risk_ass)
+            else:
+                risk_ass.score = risk_res.score
+                risk_ass.level = risk_res.level
+                risk_ass.reasons_json = reasons_json
+
             service_count += 1
         for key, service in existing_services.items():
             if key not in seen_services and service.state == "open":
-                service.state = "closed"
+                if scanned_ports and key in scanned_ports:
+                    service.state = "closed"
 
-    for ip_address, asset in existing_assets.items():
-        if ip_address not in seen_ips and asset.state == "active":
-            asset.state = "inactive"
     db.commit()
     return len(hosts), service_count
 

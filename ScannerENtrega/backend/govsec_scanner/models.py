@@ -177,6 +177,57 @@ class DiscoveredAsset(Base):
     )
 
 
+class ServiceObservation(Base):
+    __tablename__ = "service_observations"
+    __table_args__ = (
+        UniqueConstraint("execution_id", "service_id", name="uq_service_observation_exec_service"),
+        Index("ix_service_obs_service_id", "service_id"),
+        Index("ix_service_obs_exec_id", "execution_id"),
+        Index("ix_service_obs_observed_at", "observed_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    service_id: Mapped[str] = mapped_column(
+        ForeignKey("discovered_services.id", ondelete="CASCADE"), nullable=False
+    )
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("scan_executions.id", ondelete="CASCADE"), nullable=False
+    )
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    state: Mapped[str] = mapped_column(String(20), nullable=False)
+    raw_service_name: Mapped[str | None] = mapped_column(String(120))
+    normalized_service_name: Mapped[str | None] = mapped_column(String(120))
+    raw_product: Mapped[str | None] = mapped_column(String(255))
+    normalized_product: Mapped[str | None] = mapped_column(String(255))
+    raw_version: Mapped[str | None] = mapped_column(String(120))
+    normalized_version: Mapped[str | None] = mapped_column(String(120))
+    cpe: Mapped[str | None] = mapped_column(String(255))
+    category: Mapped[str | None] = mapped_column(String(60))
+    confidence: Mapped[str | None] = mapped_column(String(20))
+
+
+class ServiceRiskAssessment(Base):
+    __tablename__ = "service_risk_assessments"
+    __table_args__ = (
+        UniqueConstraint("execution_id", "service_id", name="uq_service_risk_assessment_exec_service"),
+        Index("ix_service_risk_service_id", "service_id"),
+        Index("ix_service_risk_exec_id", "execution_id"),
+        Index("ix_service_risk_level", "level"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    service_id: Mapped[str] = mapped_column(
+        ForeignKey("discovered_services.id", ondelete="CASCADE"), nullable=False
+    )
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("scan_executions.id", ondelete="CASCADE"), nullable=False
+    )
+    score: Mapped[int] = mapped_column(Integer, nullable=False)
+    level: Mapped[str] = mapped_column(String(20), nullable=False)
+    reasons_json: Mapped[str] = mapped_column(Text, nullable=False)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class DiscoveredService(Base):
     __tablename__ = "discovered_services"
     __table_args__ = (
@@ -195,6 +246,16 @@ class DiscoveredService(Base):
     version: Mapped[str | None] = mapped_column(String(120))
     banner: Mapped[str | None] = mapped_column(Text)
     tls_details: Mapped[str | None] = mapped_column(Text)
+    normalized_service_name: Mapped[str | None] = mapped_column(String(120))
+    normalized_product: Mapped[str | None] = mapped_column(String(255))
+    normalized_version: Mapped[str | None] = mapped_column(String(120))
+    cpe: Mapped[str | None] = mapped_column(String(255))
+    category: Mapped[str | None] = mapped_column(String(60))
+    risk_score: Mapped[int | None] = mapped_column(Integer)
+    risk_level: Mapped[str | None] = mapped_column(String(20))
+    last_observation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("service_observations.id", ondelete="SET NULL", use_alter=True, name="fk_discovered_services_last_observation_id")
+    )
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_execution_id: Mapped[str | None] = mapped_column(

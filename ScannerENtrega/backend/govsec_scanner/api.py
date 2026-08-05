@@ -42,6 +42,8 @@ from govsec_scanner.models import (
     ScanExecution,
     ScannerProfile,
     ScanSchedule,
+    ServiceObservation,
+    ServiceRiskAssessment,
     VulnerabilityFinding,
     utcnow,
 )
@@ -63,7 +65,11 @@ from govsec_scanner.schemas import (
     ScheduleCreate,
     ScheduleOut,
     SchedulePatch,
+    ServiceDetailOut,
+    ServiceHistoryOut,
+    ServiceObservationRead,
     ServiceOut,
+    ServiceRiskAssessmentRead,
     SummaryOut,
 )
 from govsec_scanner.scope import ScopeViolation, overlaps, validate_scope
@@ -657,6 +663,106 @@ def list_assets(range_id: str | None = None, db: Session = Depends(get_db)) -> l
             )
         )
     return output
+
+
+@router.get("/assets/{asset_id}/services", response_model=list[ServiceOut])
+def get_asset_services(asset_id: str, db: Session = Depends(get_db)) -> list[ServiceOut]:
+    asset = db.get(DiscoveredAsset, asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="Ativo nao encontrado.")
+    
+    services = db.scalars(
+        select(DiscoveredService)
+        .where(DiscoveredService.asset_id == asset_id)
+        .order_by(DiscoveredService.port)
+    ).all()
+    
+    out: list[ServiceOut] = []
+    for s in services:
+        reasons: list[str] = []
+        if s.last_execution_id:
+            risk = db.scalar(
+                select(ServiceRiskAssessment).where(
+                    ServiceRiskAssessment.service_id == s.id,
+                    ServiceRiskAssessment.execution_id == s.last_execution_id,
+                )
+            )
+            if risk and risk.reasons_json:
+                reasons = json.loads(risk.reasons_json)
+        
+        s_dict = {
+            column.name: getattr(s, column.name)
+            for column in DiscoveredService.__table__.columns
+        }
+        s_dict["reasons"] = reasons
+        out.append(ServiceOut(**s_dict))
+        
+    return out
+
+
+@router.get("/services/{service_id}", response_model=ServiceDetailOut)
+def get_service_detail(service_id: str, db: Session = Depends(get_db)) -> ServiceDetailOut:
+    s = db.scalar(
+        select(DiscoveredService)
+        .options(selectinload(DiscoveredService.asset))
+        .where(DiscoveredService.id == service_id)
+    )
+    if s is None:
+        raise HTTPException(status_code=404, detail="Servico nao encontrado.")
+    
+    reasons: list[str] = []
+    if s.last_execution_id:
+        risk = db.scalar(
+            select(ServiceRiskAssessment).where(
+                ServiceRiskAssessment.service_id == s.id,
+                ServiceRiskAssessment.execution_id == s.last_execution_id,
+            )
+        )
+        if risk and risk.reasons_json:
+            reasons = json.loads(risk.reasons_json)
+
+    s_dict = {
+        column.name: getattr(s, column.name)
+        for column in DiscoveredService.__table__.columns
+    }
+    s_dict["reasons"] = reasons
+    s_dict["ip_address"] = s.asset.ip_address if s.asset else None
+    return ServiceDetailOut(**s_dict)
+
+
+@router.get("/services/{service_id}/history", response_model=ServiceHistoryOut)
+def get_service_history(service_id: str, db: Session = Depends(get_db)) -> ServiceHistoryOut:
+    s = db.get(DiscoveredService, service_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="Servico nao encontrado.")
+
+    observations = db.scalars(
+        select(ServiceObservation)
+        .where(ServiceObservation.service_id == service_id)
+        .order_by(ServiceObservation.observed_at.asc())
+    ).all()
+
+    risks = db.scalars(
+        select(ServiceRiskAssessment)
+        .where(ServiceRiskAssessment.service_id == service_id)
+        .order_by(ServiceRiskAssessment.evaluated_at.asc())
+    ).all()
+
+    obs_out = [ServiceObservationRead.model_validate(obs) for obs in observations]
+    risk_out = [
+        ServiceRiskAssessmentRead(
+            id=r.id,
+            service_id=r.service_id,
+            execution_id=r.execution_id,
+            score=r.score,
+            level=r.level,
+            reasons=json.loads(r.reasons_json) if r.reasons_json else [],
+            evaluated_at=r.evaluated_at,
+        )
+        for r in risks
+    ]
+
+    return ServiceHistoryOut(observations=obs_out, risk_assessments=risk_out)
 
 
 @router.get("/findings", response_model=list[FindingOut])
