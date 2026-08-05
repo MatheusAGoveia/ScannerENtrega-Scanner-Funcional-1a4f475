@@ -94,6 +94,8 @@ def test_partial_scan_reconciliation(db_session):
     db_session.add(execution2)
     db_session.commit()
     
+    # Nmap must report an explicit closed state before current inventory is
+    # changed; a missing port in a partial scan is NOT evidence of closure.
     hosts_scan2 = [
         HostObservation(
             ip_address="10.0.0.1",
@@ -178,7 +180,9 @@ def test_complete_scan_closes_port(db_session):
             ip_address="10.0.1.1",
             hostname="server2",
             os_name="Linux",
-            services=[]
+            services=[
+                ServiceObservation(protocol="tcp", port=22, state="closed", service_name="ssh"),
+            ]
         )
     ]
     _persist_hosts(db_session, execution2, hosts_scan2)

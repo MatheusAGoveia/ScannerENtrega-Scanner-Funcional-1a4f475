@@ -24,6 +24,7 @@ class ServiceObservation:
     version: str | None = None
     banner: str | None = None
     tls_details: str | None = None
+    cpe: str | None = None
 
 
 @dataclass

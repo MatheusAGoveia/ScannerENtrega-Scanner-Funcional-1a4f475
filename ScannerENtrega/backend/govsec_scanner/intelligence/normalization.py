@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-from typing import Any
 
 SERVICE_ALIASES = {
     "ssl/http": "https",
@@ -65,24 +63,12 @@ def normalize_version(raw_version: str | None) -> str | None:
     return cleaned
 
 def extract_or_build_cpe(product: str | None, version: str | None) -> str | None:
-    prod_norm = normalize_product(product)
-    ver_norm = normalize_version(version)
-    if not prod_norm:
-        return None
-    
-    # Simple deterministic CPE builder for standard products
-    cpe_vendor_product_map = {
-        "iis": ("microsoft", "internet_information_services"),
-        "apache": ("apache", "http_server"),
-        "nginx": ("nginx", "nginx"),
-        "openssh": ("openbsd", "openssh"),
-    }
-    
-    if prod_norm in cpe_vendor_product_map:
-        vendor, cpe_prod = cpe_vendor_product_map[prod_norm]
-        ver_part = ver_norm if ver_norm else "*"
-        return f"cpe:2.3:a:{vendor}:{cpe_prod}:{ver_part}:*:*:*:*:*:*:*"
-    
+    """Deprecated compatibility shim.
+
+    A product/version pair is not sufficient evidence to create a CPE.  CPEs
+    are therefore retained only when supplied by a scanner that reported one.
+    """
+    del product, version
     return None
 
 def normalize_service_observation(
@@ -96,7 +82,8 @@ def normalize_service_observation(
     norm_name = normalize_service_name(service_name, port, protocol)
     norm_product = normalize_product(product)
     norm_version = normalize_version(version)
-    cpe = cpe_raw or extract_or_build_cpe(norm_product, norm_version)
+    # Do not infer a CPE.  It is scanner evidence, not a normalization result.
+    cpe = cpe_raw.strip() if cpe_raw and cpe_raw.strip() else None
     
     return NormalizedServiceData(
         service_name_raw=service_name,

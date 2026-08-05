@@ -13,6 +13,8 @@ class RiskResult:
     reasons: list[str] = field(default_factory=list)
 
 def calculate_level(score: int) -> str:
+    if score <= 0:
+        return "INFO"
     if score >= 75:
         return "CRITICAL"
     if score >= 50:
@@ -76,6 +78,10 @@ def evaluate_service_risk(
         elif max_severity == "medium":
             score += 15
             reasons.append("Vulnerabilidade MEDIUM associada ao serviço")
+
+        finding_count = len(findings)
+        score += min(15, finding_count * 5)
+        reasons.append(f"{finding_count} finding(s) aberto(s) associado(s) ao serviço")
 
     # Cap score at 100
     final_score = min(100, score)

@@ -91,6 +91,17 @@ def test_nmap_xml_must_remain_inside_scope() -> None:
         parse_nmap_xml(NMAP_XML, "10.42.17.0/24")
 
 
+def test_nmap_retains_reported_cpe_and_closed_port_evidence() -> None:
+    payload = b"""<nmaprun><host><address addr='10.42.16.13' addrtype='ipv4'/><ports>
+    <port protocol='tcp' portid='443'><state state='open'/><service name='https'><cpe>cpe:/a:nginx:nginx:1.26</cpe></service></port>
+    <port protocol='tcp' portid='22'><state state='closed'/></port>
+    <port protocol='tcp' portid='23'><state state='filtered'/></port>
+    </ports></host></nmaprun>"""
+    host = parse_nmap_xml(payload, "10.42.16.0/24")[0]
+    assert [(service.port, service.state) for service in host.services] == [(443, "open"), (22, "closed")]
+    assert host.services[0].cpe == "cpe:/a:nginx:nginx:1.26"
+
+
 def test_real_nmap_adapter_executes_a_bounded_subprocess(
     tmp_path: Path, scanner_profile: ScannerProfile
 ) -> None:

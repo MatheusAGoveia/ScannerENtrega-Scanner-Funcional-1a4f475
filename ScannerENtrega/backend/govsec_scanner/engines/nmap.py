@@ -64,7 +64,6 @@ def build_nmap_command(
         binary,
         "-n",
         "-Pn",
-        "--open",
         "--reason",
         "--max-retries",
         "1",
@@ -133,17 +132,18 @@ def parse_nmap_xml(payload: bytes, expected_scope: str) -> list[HostObservation]
         services: list[ServiceObservation] = []
         for port_node in host_node.findall("ports/port"):
             state_node = port_node.find("state")
-            if state_node is None or state_node.attrib.get("state") not in {
-                "open",
-                "open|filtered",
-            }:
+            state = state_node.attrib.get("state") if state_node is not None else None
+            # Only CLOSED is conclusive negative evidence.  Filtered and
+            # unknown states must not overwrite the last observed state.
+            if state not in {"open", "open|filtered", "closed"}:
                 continue
             service_node = port_node.find("service")
+            cpe_node = service_node.find("cpe") if service_node is not None else None
             services.append(
                 ServiceObservation(
                     protocol=port_node.attrib.get("protocol", "tcp"),
                     port=int(port_node.attrib["portid"]),
-                    state=state_node.attrib.get("state", "open"),
+                    state=state,
                     service_name=service_node.attrib.get("name")
                     if service_node is not None
                     else None,
@@ -153,19 +153,19 @@ def parse_nmap_xml(payload: bytes, expected_scope: str) -> list[HostObservation]
                     version=service_node.attrib.get("version")
                     if service_node is not None
                     else None,
+                    cpe=cpe_node.text.strip() if cpe_node is not None and cpe_node.text else None,
                 )
             )
-        if services:
-            observations.append(
-                HostObservation(
-                    ip_address=address,
-                    hostname=hostname_node.attrib.get("name")
-                    if hostname_node is not None
-                    else None,
-                    os_name=os_node.attrib.get("name") if os_node is not None else None,
-                    services=services,
-                )
+        observations.append(
+            HostObservation(
+                ip_address=address,
+                hostname=hostname_node.attrib.get("name")
+                if hostname_node is not None
+                else None,
+                os_name=os_node.attrib.get("name") if os_node is not None else None,
+                services=services,
             )
+        )
     return observations
 
 

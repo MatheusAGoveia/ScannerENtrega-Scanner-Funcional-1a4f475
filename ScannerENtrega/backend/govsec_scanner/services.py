@@ -203,13 +203,82 @@ def _parse_scanned_ports(profile: ScannerProfile | None) -> set[tuple[str, int]]
     return scanned
 
 
+def _record_service_risk(
+    db: Session,
+    execution: ScanExecution,
+    asset: DiscoveredAsset,
+    service: DiscoveredService,
+    catalog_item: Any,
+    *,
+    evaluated_at: datetime | None = None,
+) -> None:
+    """Persist the current, explainable risk snapshot for a service.
+
+    The snapshot is deliberately recalculated after Nuclei persists findings,
+    so an execution's risk always incorporates findings correlated to its exact
+    asset/protocol/port.
+    """
+    now = evaluated_at or utcnow()
+    encrypted_ports = {443, 465, 636, 993, 995, 2376, 5986, 8443}
+    context_data = evaluate_context(
+        ip_address=asset.ip_address,
+        category=service.category or "other",
+        is_remote_access=catalog_item.is_remote_access if catalog_item else False,
+        is_encrypted=bool(
+            (catalog_item and catalog_item.is_encrypted)
+            or service.port in encrypted_ports
+            or service.tls_details
+        ),
+    )
+    findings = [
+        {"severity": finding.severity}
+        for finding in db.scalars(
+            select(VulnerabilityFinding).where(
+                VulnerabilityFinding.service_id == service.id,
+                VulnerabilityFinding.status == "open",
+            )
+        ).all()
+    ]
+    risk_res = evaluate_service_risk(
+        service_name=service.normalized_service_name,
+        catalog_item=catalog_item,
+        context=context_data,
+        findings=findings,
+    )
+    service.risk_score = risk_res.score
+    service.risk_level = risk_res.level
+
+    assessment = db.scalar(
+        select(ServiceRiskAssessment).where(
+            ServiceRiskAssessment.execution_id == execution.id,
+            ServiceRiskAssessment.service_id == service.id,
+        )
+    )
+    reasons_json = json.dumps(risk_res.reasons, ensure_ascii=False)
+    if assessment is None:
+        db.add(
+            ServiceRiskAssessment(
+                service_id=service.id,
+                execution_id=execution.id,
+                score=risk_res.score,
+                level=risk_res.level,
+                reasons_json=reasons_json,
+                evaluated_at=now,
+            )
+        )
+    else:
+        assessment.score = risk_res.score
+        assessment.level = risk_res.level
+        assessment.reasons_json = reasons_json
+        assessment.evaluated_at = now
+
+
 def _persist_hosts(
     db: Session,
     execution: ScanExecution,
     hosts: list[HostObservation],
 ) -> tuple[int, int]:
     now = utcnow()
-    seen_ips = {host.ip_address for host in hosts}
     existing_assets = {
         asset.ip_address: asset
         for asset in db.scalars(
@@ -218,7 +287,6 @@ def _persist_hosts(
             .where(DiscoveredAsset.range_id == execution.range_id)
         ).all()
     }
-    scanned_ports = _parse_scanned_ports(execution.profile if hasattr(execution, "profile") else None)
     service_count = 0
     for host in hosts:
         asset = existing_assets.get(host.ip_address)
@@ -229,17 +297,19 @@ def _persist_hosts(
             existing_assets[host.ip_address] = asset
         asset.hostname = host.hostname
         asset.os_name = host.os_name
-        asset.state = "active"
+        asset.state = host.state
         asset.last_seen_at = now
         asset.last_execution_id = execution.id
         existing_services = {
             (service.protocol, service.port): service for service in asset.services
         }
-        seen_services: set[tuple[str, int]] = set()
         for observed in host.services:
             key = (observed.protocol, observed.port)
-            seen_services.add(key)
             service = existing_services.get(key)
+            # A newly observed closed port is useful scan coverage evidence,
+            # but it is not a discovered service.  Keep it out of inventory.
+            if service is None and observed.state == "closed":
+                continue
             if service is None:
                 service = DiscoveredService(
                     asset_id=asset.id,
@@ -255,7 +325,7 @@ def _persist_hosts(
                 version=observed.version,
                 port=observed.port,
                 protocol=observed.protocol,
-                cpe_raw=None,
+                cpe_raw=observed.cpe,
             )
             catalog_item = default_catalog.resolve(
                 service_name=norm_data.service_name_normalized,
@@ -263,18 +333,6 @@ def _persist_hosts(
                 port=observed.port,
             )
             category = catalog_item.category if catalog_item else "general"
-            context_data = evaluate_context(
-                ip_address=host.ip_address,
-                category=category,
-                is_remote_access=catalog_item.is_remote_access if catalog_item else False,
-                is_encrypted=catalog_item.is_encrypted if catalog_item else False,
-            )
-            risk_res = evaluate_service_risk(
-                service_name=norm_data.service_name_normalized,
-                catalog_item=catalog_item,
-                context=context_data,
-            )
-
             service.state = observed.state
             service.service_name = observed.service_name
             service.product = observed.product
@@ -286,8 +344,6 @@ def _persist_hosts(
             service.normalized_version = norm_data.version_normalized
             service.cpe = norm_data.cpe
             service.category = category
-            service.risk_score = risk_res.score
-            service.risk_level = risk_res.level
             service.last_seen_at = now
             service.last_execution_id = execution.id
 
@@ -331,34 +387,9 @@ def _persist_hosts(
 
             service.last_observation_id = obs.id
 
-            # Idempotent ServiceRiskAssessment
-            risk_ass = db.scalar(
-                select(ServiceRiskAssessment).where(
-                    ServiceRiskAssessment.execution_id == execution.id,
-                    ServiceRiskAssessment.service_id == service.id,
-                )
-            )
-            reasons_json = json.dumps(risk_res.reasons, ensure_ascii=False)
-            if risk_ass is None:
-                risk_ass = ServiceRiskAssessment(
-                    service_id=service.id,
-                    execution_id=execution.id,
-                    score=risk_res.score,
-                    level=risk_res.level,
-                    reasons_json=reasons_json,
-                    evaluated_at=now,
-                )
-                db.add(risk_ass)
-            else:
-                risk_ass.score = risk_res.score
-                risk_ass.level = risk_res.level
-                risk_ass.reasons_json = reasons_json
+            _record_service_risk(db, execution, asset, service, catalog_item, evaluated_at=now)
 
             service_count += 1
-        for key, service in existing_services.items():
-            if key not in seen_services and service.state == "open":
-                if scanned_ports and key in scanned_ports:
-                    service.state = "closed"
 
     db.commit()
     return len(hosts), service_count
@@ -377,6 +408,7 @@ def _persist_findings(
         ).all()
     }
     count = 0
+    affected_service_ids: set[str] = set()
     for observed in findings:
         asset = assets.get(observed.ip_address)
         if asset is None:
@@ -419,7 +451,24 @@ def _persist_findings(
         finding.last_seen_at = now
         finding.last_execution_id = execution.id
         finding.status = "open"
+        if service is not None:
+            affected_service_ids.add(service.id)
         count += 1
+    db.flush()
+    for service_id in affected_service_ids:
+        service = db.scalar(
+            select(DiscoveredService)
+            .options(selectinload(DiscoveredService.asset))
+            .where(DiscoveredService.id == service_id)
+        )
+        if service is None or service.asset is None:
+            continue
+        catalog_item = default_catalog.resolve(
+            service_name=service.normalized_service_name,
+            product=service.normalized_product,
+            port=service.port,
+        )
+        _record_service_risk(db, execution, service.asset, service, catalog_item, evaluated_at=now)
     db.commit()
     return count
 

@@ -30,4 +30,11 @@ def test_service_catalog_resolution_fallback_port():
 
 def test_service_catalog_18_services():
     catalog = ServiceCatalog()
-    assert len(catalog.items) >= 18
+    assert len(catalog.items) >= 25
+
+
+def test_service_catalog_resolves_microsoft_sql_by_product():
+    catalog = ServiceCatalog()
+    item = catalog.resolve(product="Microsoft SQL Server 2022")
+    assert item is not None
+    assert item.key == "mssql"

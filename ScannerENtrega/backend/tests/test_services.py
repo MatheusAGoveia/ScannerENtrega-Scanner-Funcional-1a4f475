@@ -15,10 +15,12 @@ from govsec_scanner.engines.nuclei import NucleiEngine
 from govsec_scanner.models import (
     AuthorizedRange,
     DiscoveredAsset,
+    DiscoveredService,
     EngineRun,
     ScanExecution,
     ScannerProfile,
     VulnerabilityFinding,
+    ServiceRiskAssessment,
 )
 from govsec_scanner.services import execute_scan, seed_profiles
 
@@ -57,7 +59,7 @@ def test_worker_pipeline_persists_real_engine_results(tmp_path: Path, monkeypatc
                 protocol="tcp",
                 template_id="test-observation",
                 name="Observacao controlada",
-                severity="low",
+                severity="high",
                 matched_at="http://127.0.0.1:8080",
             )
         ]
@@ -110,6 +112,17 @@ def test_worker_pipeline_persists_real_engine_results(tmp_path: Path, monkeypatc
                 VulnerabilityFinding.template_id == "test-observation"
             )
         )
+        service = db.scalar(select(DiscoveredService).where(DiscoveredService.port == 8080))
+        assert service is not None
+        risk = db.scalar(
+            select(ServiceRiskAssessment).where(
+                ServiceRiskAssessment.execution_id == execution_id,
+                ServiceRiskAssessment.service_id == service.id,
+            )
+        )
+        assert risk is not None
+        assert risk.score >= 50
+        assert "Vulnerabilidade HIGH" in risk.reasons_json
         assert len(db.scalars(select(EngineRun)).all()) == 3
 
     engine.dispose()
